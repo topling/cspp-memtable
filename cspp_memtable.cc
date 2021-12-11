@@ -1,9 +1,10 @@
 // Copyright (c) 2021-present, Topling, Inc.  All rights reserved.
 // Created by leipeng, fully rewrite by leipeng 2021-05-12
 #include "db/memtable.h"
-//#include "table/terark_zip_internal.h"
 #include "topling/side_plugin_factory.h"
 #include <terark/fsa/cspptrie.inl>
+#include <terark/num_to_str.hpp>
+const char* git_version_hash_info_cspp_memtable();
 namespace ROCKSDB_NAMESPACE {
 using namespace terark;
 static const uint32_t LOCK_FLAG = uint32_t(1) << 31;
@@ -337,6 +338,30 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   }
   bool IsKeyPinned() const final { return false; }
 };
+void JS_CSPPMemTab_AddVersion(json& djs, bool html) {
+  auto& ver = djs["version"];
+  const char* git_ver = git_version_hash_info_cspp_memtable();
+  if (html) {
+    std::string topling_rocks = HtmlEscapeMin(strstr(git_ver, "commit ") + strlen("commit "));
+    auto headstr = [](const std::string& s, auto pos) {
+      return terark::fstring(s.data(), pos - s.begin());
+    };
+    auto tailstr = [](const std::string& s, auto pos) {
+      return terark::fstring(&*pos, s.end() - pos);
+    };
+    auto topling_rocks_sha_end = std::find_if(topling_rocks.begin(), topling_rocks.end(), &isspace);
+    terark::string_appender<> oss_rocks, oss_core;
+    oss_rocks|"<pre>"
+             |"<a href='https://github.com/topling/cspp-memtable/commit/"
+             |headstr(topling_rocks, topling_rocks_sha_end)|"'>"
+             |headstr(topling_rocks, topling_rocks_sha_end)|"</a>"
+             |tailstr(topling_rocks, topling_rocks_sha_end)
+             |"</pre>";
+    ver = static_cast<std::string&&>(oss_rocks);
+  } else {
+    ver = git_ver;
+  }
+}
 struct CSPPMemTabFactory final : public MemTableRepFactory {
   intptr_t m_mem_cap = 2LL << 30;
   bool   use_vm = true;
@@ -385,6 +410,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_PROP(djs, live_iter_num);
     ROCKSDB_JSON_SET_SIZE(djs, avg_used_mem);
     ROCKSDB_JSON_SET_SIZE(djs, cumu_used_mem);
+    JS_CSPPMemTab_AddVersion(djs, JsonSmartBool(d, "html"));
     return JsonToString(djs, d);
   }
 };
