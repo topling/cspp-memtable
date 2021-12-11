@@ -154,7 +154,7 @@ ifeq (, ${prefix})
 endif
 ToplingRocks_lib := topling-rocks
 ToplingRocks_src := $(wildcard src/table/*.cc)
-ToplingRocks_src += ${BUILD_ROOT}/git-version-cspp_memtab.cc
+ToplingRocks_src += ${BUILD_ROOT}/git-version-cspp_memtable.cc
 
 TerarkTests_src += $(wildcard src/table/tests/*.cc)
 
