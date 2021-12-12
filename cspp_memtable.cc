@@ -370,6 +370,8 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
   uint64_t cumu_used_mem = 0;
+  std::vector<CSPPMemTab*> m_all;
+  mutable std::mutex m_mtx;
   CSPPMemTabFactory(const json& js, const SidePluginRepo& r) { Update(js, r); }
   using MemTableRepFactory::CreateMemTableRep;
   MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator& cmp,
@@ -410,6 +412,11 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_PROP(djs, live_iter_num);
     ROCKSDB_JSON_SET_SIZE(djs, avg_used_mem);
     ROCKSDB_JSON_SET_SIZE(djs, cumu_used_mem);
+    size_t token_qlen = 0;
+    m_mtx.lock();
+    for (auto memtab : m_all) token_qlen += memtab->m_trie.get_token_qlen();
+    m_mtx.unlock();
+    ROCKSDB_JSON_SET_PROP(djs, token_qlen);
     JS_CSPPMemTab_AddVersion(djs, JsonSmartBool(d, "html"));
     return JsonToString(djs, d);
   }
@@ -442,10 +449,16 @@ CSPPMemTab::CSPPMemTab(intptr_t cap, bool rev, Logger* log, CSPPMemTabFactory* f
   m_token_use_idle = f->token_use_idle;
   as_atomic(f->live_num).fetch_add(1, std::memory_order_relaxed);
   as_atomic(f->cumu_num).fetch_add(1, std::memory_order_relaxed);
+  f->m_mtx.lock();
+  f->m_all.push_back(this);
+  f->m_mtx.unlock();
 }
 CSPPMemTab::~CSPPMemTab() noexcept {
   TERARK_ASSERT_EZ(m_live_iter_num);
   as_atomic(m_fac->live_num).fetch_sub(1, std::memory_order_relaxed);
+  m_fac->m_mtx.lock();
+  m_fac->m_all.erase(std::find(m_fac->m_all.begin(), m_fac->m_all.end(), this));
+  m_fac->m_mtx.unlock();
 }
 void CSPPMemTab::MarkReadOnly() {
   auto used = m_trie.mem_size_inline();
