@@ -351,7 +351,7 @@ void JS_CSPPMemTab_AddVersion(json& djs, bool html) {
       return terark::fstring(&*pos, s.end() - pos);
     };
     auto topling_rocks_sha_end = std::find_if(topling_rocks.begin(), topling_rocks.end(), &isspace);
-    terark::string_appender<> oss_rocks, oss_core;
+    terark::string_appender<> oss_rocks;
     oss_rocks|"<pre>"
              |"<a href='https://github.com/topling/cspp-memtable/commit/"
              |headstr(topling_rocks, topling_rocks_sha_end)|"'>"
