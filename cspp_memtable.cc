@@ -169,6 +169,7 @@ bool CSPPMemTab::Token::insert_for_dup_user_key() {
   const uint64_t curr_seq = tag_ >> 8;
   const uint64_t last_seq = entry_old[num-1].tag >> 8;
   if (UNLIKELY(curr_seq == last_seq)) {
+    as_atomic(vec_pin->num).store(num, std::memory_order_release);
     return false; // duplicate internal_key(user_key, tag)
   }
   size_t enc_val_pos = trie->mem_alloc(VarintLength(val_.size()) + val_.size());
@@ -467,4 +468,9 @@ void CSPPMemTab::MarkReadOnly() {
 }
 ROCKSDB_REG_JSON_REPO_CONS("cspp", CSPPMemTabFactory, MemTableRepFactory);
 ROCKSDB_REG_EasyProxyManip("cspp", CSPPMemTabFactory, MemTableRepFactory);
+MemTableRepFactory* NewCSPPMemTabForPlain(const std::string& jstr) {
+  json js = json::parse(jstr);
+  const SidePluginRepo repo;
+  return new CSPPMemTabFactory(js, repo);
+}
 } // namespace ROCKSDB_NAMESPACE
