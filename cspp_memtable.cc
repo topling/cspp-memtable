@@ -364,10 +364,12 @@ void JS_CSPPMemTab_AddVersion(json& djs, bool html) {
     ver = git_ver;
   }
 }
+ROCKSDB_ENUM_CLASS(HugePageEnum, uint8_t, kNone = 0, kMmap = 1, kTransparent = 2);
 struct CSPPMemTabFactory final : public MemTableRepFactory {
+  std::string m_hugepage_str = "?hugepage=0";
   intptr_t m_mem_cap = 2LL << 30;
   bool   use_vm = true;
-  bool   use_hugepage = false;
+  HugePageEnum  use_hugepage = HugePageEnum::kNone;
   bool   token_use_idle = true;
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
@@ -395,7 +397,19 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     size_t mem_cap = m_mem_cap;
     ROCKSDB_JSON_OPT_SIZE(js, mem_cap);
     ROCKSDB_JSON_OPT_PROP(js, use_vm);
-    ROCKSDB_JSON_OPT_PROP(js, use_hugepage);
+    auto iter = js.find("use_hugepage");
+    if (js.end() != iter) {
+      auto& jhg = iter.value();
+      if (jhg.is_boolean()) {
+        use_hugepage = jhg.get<bool>() ? HugePageEnum::kMmap
+                                       : HugePageEnum::kNone;
+      } else if (jhg.is_string()) {
+        ROCKSDB_JSON_OPT_ENUM(js, use_hugepage);
+      } else {
+        THROW_InvalidArgument("use_hugepage must be bool or HugePageEnum");
+      }
+      m_hugepage_str = "?hugepage=" + std::to_string(int(use_hugepage));
+    }
     ROCKSDB_JSON_OPT_PROP(js, token_use_idle);
     m_mem_cap = std::max<intptr_t>(mem_cap, 2LL << 30);
   }
@@ -405,7 +419,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     json djs;
     ROCKSDB_JSON_SET_SIZE(djs, mem_cap);
     ROCKSDB_JSON_SET_PROP(djs, use_vm);
-    ROCKSDB_JSON_SET_PROP(djs, use_hugepage);
+    ROCKSDB_JSON_SET_ENUM(djs, use_hugepage);
     ROCKSDB_JSON_SET_PROP(djs, token_use_idle);
     ROCKSDB_JSON_SET_PROP(djs, cumu_num);
     ROCKSDB_JSON_SET_PROP(djs, live_num);
@@ -444,7 +458,7 @@ CSPPMemTab::Iter::~Iter() noexcept {
 CSPPMemTab::CSPPMemTab(intptr_t cap, bool rev, Logger* log, CSPPMemTabFactory* f)
     : MemTableRep(nullptr)
     , m_trie(4, f->use_vm ? -cap : cap, Patricia::MultiWriteMultiRead,
-             f->use_hugepage ? "?hugepage=1" : "") {
+             f->m_hugepage_str) {
   m_fac = f;
   m_log = log;
   m_rev = rev;
