@@ -376,7 +376,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   uint64_t cumu_used_mem = 0;
   std::vector<CSPPMemTab*> m_all;
   mutable std::mutex m_mtx;
-  CSPPMemTabFactory(const json& js, const SidePluginRepo& r) { Update(js, r); }
+  CSPPMemTabFactory(const json& js, const SidePluginRepo& r) { Update({}, js, r); }
   using MemTableRepFactory::CreateMemTableRep;
   MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator& cmp,
                                  Allocator*, const SliceTransform*,
@@ -393,7 +393,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   bool IsInsertConcurrentlySupported() const final { return true; }
   bool CanHandleDuplicatedKey() const final { return true; }
 //-----------------------------------------------------------------
-  void Update(const json& js, const SidePluginRepo&) {
+  void Update(const json&, const json& js, const SidePluginRepo&) {
     size_t mem_cap = m_mem_cap;
     ROCKSDB_JSON_OPT_SIZE(js, mem_cap);
     ROCKSDB_JSON_OPT_PROP(js, use_vm);
