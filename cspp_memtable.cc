@@ -60,13 +60,13 @@ struct CSPPMemTab : public MemTableRep {
   }
   bool Contains(const Slice& ikey) const final {
     fstring user_key(ikey.data(), ikey.size() - 8);
-    uint64_t find_tag = DecodeFixed64(user_key.end());
     auto token = m_trie.tls_reader_token();
     token->acquire(&m_trie);
     if (!m_trie.lookup(user_key, token)) {
       m_token_use_idle ? token->idle() : token->release();
       return false;
     }
+    uint64_t find_tag = DecodeFixed64(user_key.end());
     auto vec_pin = (VecPin*)m_trie.mem_get(*(uint32_t*)token->value());
     auto num = vec_pin->num & ~LOCK_FLAG;
     auto entry = (Entry*)m_trie.mem_get(vec_pin->pos);
@@ -95,13 +95,10 @@ struct CSPPMemTab : public MemTableRep {
   };
   void Get(const LookupKey& k, void* callback_args,
            bool(*callback_func)(void*, const KeyValuePair*)) final {
-    Slice ikey = k.internal_key();
-    Context ctx(ikey, ikey.size_ > MAX_alloca ? malloc(ikey.size_)
-                                              : alloca(ikey.size_));
-    uint64_t find_tag = DecodeFixed64(ikey.data_ + ikey.size_ - 8);
+    const Slice ikey = k.internal_key();
     auto token = m_trie.tls_reader_token();
     token->acquire(&m_trie);
-    if (!m_trie.lookup(Slice(ikey.data_, ikey.size_ - 8), token)) {
+    if (!m_trie.lookup(fstring(ikey.data_, ikey.size_ - 8), token)) {
       m_token_use_idle ? token->idle() : token->release();
       return;
     }
@@ -109,6 +106,9 @@ struct CSPPMemTab : public MemTableRep {
     auto vec_pin = (VecPin*)m_trie.mem_get(vec_pin_pos);
     size_t num = vec_pin->num & ~LOCK_FLAG;
     auto entry = (Entry*)m_trie.mem_get(vec_pin->pos);
+    Context ctx(ikey, ikey.size_ > MAX_alloca ? malloc(ikey.size_)
+                                              : alloca(ikey.size_));
+    uint64_t find_tag = DecodeFixed64(ikey.data_ + ikey.size_ - 8);
     intptr_t idx = upper_bound_0(entry, num, find_tag);
     while (idx--) {
       memcpy(ctx.ikey_buf + ikey.size_ - 8, &entry[idx].tag, 8);
