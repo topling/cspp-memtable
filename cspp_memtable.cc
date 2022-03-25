@@ -93,7 +93,7 @@ struct CSPPMemTab : public MemTableRep {
     size_t ikey_len;
     const char* enc_valptr = nullptr; // prefixed len encoded value ptr
   };
-  void Get(const LookupKey& k, void* callback_args,
+  void Get(const ReadOptions& ro, const LookupKey& k, void* callback_args,
            bool(*callback_func)(void*, const KeyValuePair*)) final {
     const Slice ikey = k.internal_key();
     auto token = m_trie.tls_reader_token();
@@ -110,7 +110,14 @@ struct CSPPMemTab : public MemTableRep {
                                               : alloca(ikey.size_));
     uint64_t find_tag = DecodeFixed64(ikey.data_ + ikey.size_ - 8);
     intptr_t idx = upper_bound_0(entry, num, find_tag);
-    while (idx--) {
+    if (ro.just_check_key_exists) {
+      if (idx) {
+        memcpy(ctx.ikey_buf + ikey.size_ - 8, &entry[idx].tag, 8);
+        ctx.enc_valptr = ""; // empty value
+        callback_func(callback_args, &ctx);
+      }
+    }
+    else while (idx--) {
       memcpy(ctx.ikey_buf + ikey.size_ - 8, &entry[idx].tag, 8);
       ctx.enc_valptr = (const char*)m_trie.mem_get(entry[idx].pos);
       if (!callback_func(callback_args, &ctx))
