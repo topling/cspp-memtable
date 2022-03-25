@@ -111,10 +111,16 @@ struct CSPPMemTab : public MemTableRep {
     uint64_t find_tag = DecodeFixed64(ikey.data_ + ikey.size_ - 8);
     intptr_t idx = upper_bound_0(entry, num, find_tag);
     if (ro.just_check_key_exists) {
-      if (idx) {
-        memcpy(ctx.ikey_buf + ikey.size_ - 8, &entry[idx].tag, 8);
+      while (idx--) {
+        uint64_t tag = entry[idx].tag;
+        if ((tag & 255) == kTypeMerge) {
+          // instruct get_context to stop earlier
+          tag = (tag & ~uint64_t(255)) | kTypeValue;
+        }
+        memcpy(ctx.ikey_buf + ikey.size_ - 8, &tag, 8);
         ctx.enc_valptr = ""; // empty value
-        callback_func(callback_args, &ctx);
+        if (!callback_func(callback_args, &ctx))
+          break;
       }
     }
     else while (idx--) {
