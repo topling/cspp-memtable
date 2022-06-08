@@ -494,7 +494,7 @@ void CSPPMemTab::MarkReadOnly() {
   as_atomic(m_fac->cumu_used_mem).fetch_add(used, std::memory_order_relaxed);
   m_trie.set_readonly();
 }
-ROCKSDB_REG_JSON_REPO_CONS("cspp", CSPPMemTabFactory, MemTableRepFactory);
+ROCKSDB_REG_Plugin("cspp", CSPPMemTabFactory, MemTableRepFactory);
 ROCKSDB_REG_EasyProxyManip("cspp", CSPPMemTabFactory, MemTableRepFactory);
 MemTableRepFactory* NewCSPPMemTabForPlain(const std::string& jstr) {
   json js = json::parse(jstr);
