@@ -429,6 +429,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   std::string ToString(const json& d, const SidePluginRepo&) const {
     size_t mem_cap = m_mem_cap;
     auto avg_used_mem = cumu_num ? cumu_used_mem / cumu_num : 0;
+    bool html = JsonSmartBool(d, "html");
     json djs;
     ROCKSDB_JSON_SET_SIZE(djs, mem_cap);
     ROCKSDB_JSON_SET_PROP(djs, use_vm);
@@ -442,11 +443,31 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_SIZE(djs, avg_used_mem);
     ROCKSDB_JSON_SET_SIZE(djs, cumu_used_mem);
     size_t token_qlen = 0;
+    string_appender<> detail_qlen;
+    detail_qlen.reserve(4096);
+    detail_qlen << "[ ";
     m_mtx.lock();
-    for (auto memtab : m_all) token_qlen += memtab->m_trie.get_token_qlen();
+    for (auto memtab : m_all) {
+      size_t cur_qlen = memtab->m_trie.get_token_qlen();
+      token_qlen += cur_qlen;
+      if (memtab->m_trie.is_readonly())
+        detail_qlen|cur_qlen|", ";
+      else
+        if (html)
+          detail_qlen|"<em>"|cur_qlen|"</em>, ";
+        else
+          detail_qlen|"*"|cur_qlen|"*, ";
+    }
     m_mtx.unlock();
+    if (detail_qlen.size() >= 4) {
+      detail_qlen.end()[-2] = ' ';
+      detail_qlen.end()[-1] = ']';
+    } else {
+      detail_qlen << " ]";
+    }
     ROCKSDB_JSON_SET_PROP(djs, token_qlen);
-    JS_CSPPMemTab_AddVersion(djs, JsonSmartBool(d, "html"));
+    ROCKSDB_JSON_SET_PROP(djs, detail_qlen);
+    JS_CSPPMemTab_AddVersion(djs, html);
     return JsonToString(djs, d);
   }
 };
