@@ -439,15 +439,16 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_PROP(djs, live_num);
     ROCKSDB_JSON_SET_PROP(djs, cumu_iter_num);
     ROCKSDB_JSON_SET_PROP(djs, live_iter_num);
-    ROCKSDB_JSON_SET_PROP(djs, live_iter_num);
     ROCKSDB_JSON_SET_SIZE(djs, avg_used_mem);
     ROCKSDB_JSON_SET_SIZE(djs, cumu_used_mem);
+    size_t live_used_mem = 0;
     size_t token_qlen = 0;
     string_appender<> detail_qlen;
     detail_qlen.reserve(4096);
     detail_qlen << "[ ";
     m_mtx.lock();
     for (auto memtab : m_all) {
+      live_used_mem += memtab->m_trie.mem_size_inline();
       size_t cur_qlen = memtab->m_trie.get_token_qlen();
       token_qlen += cur_qlen;
       if (memtab->m_trie.is_readonly())
@@ -465,6 +466,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     } else {
       detail_qlen << " ]";
     }
+    ROCKSDB_JSON_SET_SIZE(djs, live_used_mem);
     ROCKSDB_JSON_SET_PROP(djs, token_qlen);
     ROCKSDB_JSON_SET_PROP(djs, detail_qlen);
     JS_CSPPMemTab_AddVersion(djs, html);
