@@ -2,6 +2,7 @@
 // Created by leipeng, fully rewrite by leipeng 2021-05-12
 #include "db/memtable.h"
 #include "topling/side_plugin_factory.h"
+#include "logging/logging.h"
 #include <terark/fsa/cspptrie.inl>
 #include <terark/num_to_str.hpp>
 const char* git_version_hash_info_cspp_memtable();
@@ -80,15 +81,37 @@ struct CSPPMemTab : public MemTableRep {
   }
   void MarkReadOnly() final;
   size_t ApproximateMemoryUsage() final {
-    if (m_accurate_memsize) {
-      size_t free_sz = m_trie.slow_get_free_size();
-      // other threads are concurrently running, to minimize race condition,
-      // we get free_sz first
-      size_t all_sz = m_trie.mem_size_inline();
-      TERARK_VERIFY_GE(all_sz, free_sz);
-      return all_sz - free_sz;
+    size_t free_sz;
+    if (m_trie.is_readonly()) {
+      // fast and accurate once become readonly
+      free_sz = m_trie.mem_frag_size();
     }
-    return m_trie.mem_size_inline();
+    else {
+      if (m_accurate_memsize) {
+        // !!this is slow!!
+        // other threads are concurrently running, to minimize race condition,
+        // we get free_sz first
+        free_sz = m_trie.slow_get_free_size();
+      }
+      else {
+        // We always eliminate free size, because it seem rocksdb MemTableList
+        // has a bug(or a feature) which leaks memtables when size is not
+        // accurate. We found this bug by our online webview, and more assure
+        // by running MemTableList unit test.
+        free_sz = m_trie.mem_frag_size(); // fast but not accurate
+      }
+    }
+    size_t all_sz = m_trie.mem_size_inline();
+    if (terark_likely(all_sz > free_sz)) {
+      return all_sz - free_sz;
+    } else {
+      // if this happens, it should be a bug, just ignore it on release!
+      ROCKS_LOG_ERROR(m_log,
+       "CSPPMemTab::ApproximateMemoryUsage: all <= free : %zd %zd, ignore",
+        all_sz, free_sz);
+      ROCKSDB_ASSERT_LE(free_sz, all_sz);
+      return m_trie.mem_size_inline(); // read recent mem size again
+    }
   }
   static constexpr size_t MAX_alloca = 512;
   struct Context : public KeyValuePair {
