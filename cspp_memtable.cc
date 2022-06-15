@@ -28,6 +28,7 @@ struct CSPPMemTab : public MemTableRep {
   }
   mutable MainPatricia m_trie;
   bool          m_token_use_idle;
+  bool          m_accurate_memsize;
   bool          m_rev;
   CSPPMemTabFactory* m_fac;
   Logger*  m_log;
@@ -54,6 +55,9 @@ struct CSPPMemTab : public MemTableRep {
   bool InsertKeyValueConcurrently(const Slice& k, const Slice& v) final {
     return InsertKeyValue(k, v);
   }
+  bool InsertKeyValueWithHint(const Slice& k, const Slice& v, void**) final {
+    return InsertKeyValue(k, v);
+  }
   bool InsertKeyValueWithHintConcurrently(const Slice& k, const Slice& v,
                                           void** /*hint*/) final {
     return InsertKeyValue(k, v);
@@ -75,7 +79,17 @@ struct CSPPMemTab : public MemTableRep {
     return ret;
   }
   void MarkReadOnly() final;
-  size_t ApproximateMemoryUsage() final { return m_trie.mem_size_inline(); }
+  size_t ApproximateMemoryUsage() final {
+    if (m_accurate_memsize) {
+      size_t free_sz = m_trie.slow_get_free_size();
+      // other threads are concurrently running, to minimize race condition,
+      // we get free_sz first
+      size_t all_sz = m_trie.mem_size_inline();
+      TERARK_VERIFY_GE(all_sz, free_sz);
+      return all_sz - free_sz;
+    }
+    return m_trie.mem_size_inline();
+  }
   static constexpr size_t MAX_alloca = 512;
   struct Context : public KeyValuePair {
     Slice GetKey() const final { return {ikey_buf, ikey_len}; }
@@ -384,6 +398,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   bool   use_vm = true;
   HugePageEnum  use_hugepage = HugePageEnum::kNone;
   bool   token_use_idle = true;
+  bool   accurate_memsize = false; // mainly for debug and unit test
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
   uint64_t cumu_used_mem = 0;
@@ -424,6 +439,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
       m_hugepage_str = "?hugepage=" + std::to_string(int(use_hugepage));
     }
     ROCKSDB_JSON_OPT_PROP(js, token_use_idle);
+    ROCKSDB_JSON_OPT_PROP(js, accurate_memsize);
     m_mem_cap = std::max<intptr_t>(mem_cap, 2LL << 30);
   }
   std::string ToString(const json& d, const SidePluginRepo&) const {
@@ -499,6 +515,7 @@ CSPPMemTab::CSPPMemTab(intptr_t cap, bool rev, Logger* log, CSPPMemTabFactory* f
   m_log = log;
   m_rev = rev;
   m_token_use_idle = f->token_use_idle;
+  m_accurate_memsize = f->accurate_memsize;
   as_atomic(f->live_num).fetch_add(1, std::memory_order_relaxed);
   as_atomic(f->cumu_num).fetch_add(1, std::memory_order_relaxed);
   f->m_mtx.lock();
