@@ -99,6 +99,9 @@ struct CSPPMemTab : public MemTableRep {
         // accurate. We found this bug by our online webview, and more assure
         // by running MemTableList unit test.
         free_sz = m_trie.mem_frag_size(); // fast but not accurate
+        // more tolerations, use tls as a second chance
+        size_t tls_free_sz = m_trie.get_cur_tls_free_size();
+        free_sz = std::max(free_sz, tls_free_sz);
       }
     }
     size_t all_sz = m_trie.mem_size_inline();
