@@ -35,6 +35,7 @@ struct CSPPMemTab : public MemTableRep {
   Logger*  m_log;
   uint32_t m_cumu_iter_num = 0;
   uint32_t m_live_iter_num = 0;
+  size_t   m_mem_size = 0;
   CSPPMemTab(intptr_t cap, bool rev, Logger*, CSPPMemTabFactory*);
   ~CSPPMemTab() noexcept override;
   KeyHandle Allocate(const size_t, char**) final { TERARK_DIE("Bad call"); }
@@ -106,15 +107,17 @@ struct CSPPMemTab : public MemTableRep {
     }
     size_t all_sz = m_trie.mem_size_inline();
     if (terark_likely(all_sz > free_sz)) {
-      return all_sz - free_sz;
+      maximize(m_mem_size, all_sz - free_sz);
     } else {
       // if this happens, it should be a bug, just ignore it on release!
       ROCKS_LOG_ERROR(m_log,
        "CSPPMemTab::ApproximateMemoryUsage: all <= free : %zd %zd, ignore",
         all_sz, free_sz);
       ROCKSDB_ASSERT_LE(free_sz, all_sz);
-      return m_trie.mem_size_inline(); // read recent mem size again
+      // read recent mem size again from mem_size_inline
+      maximize(m_mem_size, m_trie.mem_size_inline());
     }
+    return m_mem_size;
   }
   static constexpr size_t MAX_alloca = 512;
   struct Context : public KeyValuePair {
