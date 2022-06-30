@@ -33,6 +33,7 @@ struct CSPPMemTab : public MemTableRep {
   bool          m_rev;
   CSPPMemTabFactory* m_fac;
   Logger*  m_log;
+  size_t   m_instance_idx;
   uint32_t m_cumu_iter_num = 0;
   uint32_t m_live_iter_num = 0;
   size_t   m_mem_size = 0;
@@ -469,7 +470,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     }
     ROCKSDB_JSON_OPT_PROP(js, token_use_idle);
     ROCKSDB_JSON_OPT_PROP(js, accurate_memsize);
-    m_mem_cap = std::max<intptr_t>(mem_cap, 2LL << 30);
+    m_mem_cap = mem_cap;
   }
   std::string ToString(const json& d, const SidePluginRepo&) const {
     size_t mem_cap = m_mem_cap;
@@ -494,15 +495,16 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     m_mtx.lock();
     for (auto memtab : m_all) {
       live_used_mem += memtab->m_trie.mem_size_inline();
+      size_t idx = memtab->m_instance_idx;
       size_t cur_qlen = memtab->m_trie.get_token_qlen();
       token_qlen += cur_qlen;
       if (memtab->m_trie.is_readonly())
-        detail_qlen|cur_qlen|", ";
+        detail_qlen|"("|idx|","|cur_qlen|"), ";
       else
         if (html)
-          detail_qlen|"<em>"|cur_qlen|"</em>, ";
+          detail_qlen|"<em>("|idx|","|cur_qlen|")</em>, ";
         else
-          detail_qlen|"*"|cur_qlen|"*, ";
+          detail_qlen|"*("|idx|","|cur_qlen|")*, ";
     }
     m_mtx.unlock();
     if (detail_qlen.size() >= 4) {
@@ -546,7 +548,7 @@ CSPPMemTab::CSPPMemTab(intptr_t cap, bool rev, Logger* log, CSPPMemTabFactory* f
   m_token_use_idle = f->token_use_idle;
   m_accurate_memsize = f->accurate_memsize;
   as_atomic(f->live_num).fetch_add(1, std::memory_order_relaxed);
-  as_atomic(f->cumu_num).fetch_add(1, std::memory_order_relaxed);
+  m_instance_idx = as_atomic(f->cumu_num).fetch_add(1, std::memory_order_relaxed);
   f->m_mtx.lock();
   f->m_all.push_back(this);
   f->m_mtx.unlock();
