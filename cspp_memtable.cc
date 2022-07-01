@@ -423,12 +423,13 @@ void JS_CSPPMemTab_AddVersion(json& djs, bool html) {
 }
 ROCKSDB_ENUM_CLASS(HugePageEnum, uint8_t, kNone = 0, kMmap = 1, kTransparent = 2);
 struct CSPPMemTabFactory final : public MemTableRepFactory {
-  std::string m_hugepage_str = "?hugepage=0";
+  std::string m_conf_str = "?hugepage=0";
   intptr_t m_mem_cap = 2LL << 30;
   bool   use_vm = true;
   HugePageEnum  use_hugepage = HugePageEnum::kNone;
   bool   token_use_idle = true;
   bool   accurate_memsize = false; // mainly for debug and unit test
+  size_t chunk_size = 2 << 20; // 2MiB
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
   uint64_t cumu_used_mem = 0;
@@ -466,10 +467,17 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
       } else {
         THROW_InvalidArgument("use_hugepage must be bool or HugePageEnum");
       }
-      m_hugepage_str = "?hugepage=" + std::to_string(int(use_hugepage));
+      m_conf_str = "?hugepage=" + std::to_string(int(use_hugepage));
     }
     ROCKSDB_JSON_OPT_PROP(js, token_use_idle);
     ROCKSDB_JSON_OPT_PROP(js, accurate_memsize);
+    iter = js.find("chunk_size");
+    if (js.end() != iter) {
+      ROCKSDB_JSON_OPT_SIZE(js, chunk_size);
+      ROCKSDB_VERIFY_F((chunk_size & (chunk_size-1)) == 0, "%zd(%#zX)",
+                        chunk_size, chunk_size);
+      static_cast<string_appender<>&>(m_conf_str)|"&chunk_size="|chunk_size;
+    }
     m_mem_cap = mem_cap;
   }
   std::string ToString(const json& d, const SidePluginRepo&) const {
@@ -478,6 +486,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     bool html = JsonSmartBool(d, "html");
     json djs;
     ROCKSDB_JSON_SET_SIZE(djs, mem_cap);
+    ROCKSDB_JSON_SET_SIZE(djs, chunk_size);
     ROCKSDB_JSON_SET_PROP(djs, use_vm);
     ROCKSDB_JSON_SET_ENUM(djs, use_hugepage);
     ROCKSDB_JSON_SET_PROP(djs, token_use_idle);
@@ -541,7 +550,7 @@ CSPPMemTab::Iter::~Iter() noexcept {
 CSPPMemTab::CSPPMemTab(intptr_t cap, bool rev, Logger* log, CSPPMemTabFactory* f)
     : MemTableRep(nullptr)
     , m_trie(4, f->use_vm ? -cap : cap, Patricia::MultiWriteMultiRead,
-             f->m_hugepage_str) {
+             f->m_conf_str) {
   m_fac = f;
   m_log = log;
   m_rev = rev;
