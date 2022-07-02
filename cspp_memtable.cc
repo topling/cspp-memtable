@@ -28,6 +28,7 @@ struct CSPPMemTab : public MemTableRep {
     memcpy(p, d.data_, d.size_);
   }
   mutable MainPatricia m_trie;
+  bool          m_read_by_writer_token;
   bool          m_token_use_idle;
   bool          m_accurate_memsize;
   bool          m_rev;
@@ -65,9 +66,15 @@ struct CSPPMemTab : public MemTableRep {
                                           void** /*hint*/) final {
     return InsertKeyValue(k, v);
   }
+  inline Patricia::TokenBase* reader_token() const {
+    if (m_read_by_writer_token)
+      return m_trie.tls_writer_token_nn<Token>();
+    else
+      return m_trie.tls_reader_token();
+  }
   bool Contains(const Slice& ikey) const final {
     fstring user_key(ikey.data(), ikey.size() - 8);
-    auto token = m_trie.tls_reader_token();
+    auto token = reader_token();
     token->acquire(&m_trie);
     if (!m_trie.lookup(user_key, token)) {
       m_token_use_idle ? token->idle() : token->release();
@@ -140,7 +147,7 @@ struct CSPPMemTab : public MemTableRep {
   void Get(const ReadOptions& ro, const LookupKey& k, void* callback_args,
            bool(*callback_func)(void*, const KeyValuePair*)) final {
     const Slice ikey = k.internal_key();
-    auto token = m_trie.tls_reader_token();
+    auto token = reader_token();
     token->acquire(&m_trie);
     if (!m_trie.lookup(fstring(ikey.data_, ikey.size_ - 8), token)) {
       m_token_use_idle ? token->idle() : token->release();
@@ -427,6 +434,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   intptr_t m_mem_cap = 2LL << 30;
   bool   use_vm = true;
   HugePageEnum  use_hugepage = HugePageEnum::kNone;
+  bool   read_by_writer_token = false;
   bool   token_use_idle = true;
   bool   accurate_memsize = false; // mainly for debug and unit test
   size_t chunk_size = 2 << 20; // 2MiB
@@ -469,6 +477,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
       }
       m_conf_str = "?hugepage=" + std::to_string(int(use_hugepage));
     }
+    ROCKSDB_JSON_OPT_PROP(js, read_by_writer_token);
     ROCKSDB_JSON_OPT_PROP(js, token_use_idle);
     ROCKSDB_JSON_OPT_PROP(js, accurate_memsize);
     iter = js.find("chunk_size");
@@ -489,6 +498,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_SIZE(djs, chunk_size);
     ROCKSDB_JSON_SET_PROP(djs, use_vm);
     ROCKSDB_JSON_SET_ENUM(djs, use_hugepage);
+    ROCKSDB_JSON_SET_PROP(djs, read_by_writer_token);
     ROCKSDB_JSON_SET_PROP(djs, token_use_idle);
     ROCKSDB_JSON_SET_PROP(djs, cumu_num);
     ROCKSDB_JSON_SET_PROP(djs, live_num);
@@ -558,6 +568,7 @@ CSPPMemTab::CSPPMemTab(intptr_t cap, bool rev, Logger* log, CSPPMemTabFactory* f
   m_fac = f;
   m_log = log;
   m_rev = rev;
+  m_read_by_writer_token = f->read_by_writer_token;
   m_token_use_idle = f->token_use_idle;
   m_accurate_memsize = f->accurate_memsize;
   as_atomic(f->live_num).fetch_add(1, std::memory_order_relaxed);
