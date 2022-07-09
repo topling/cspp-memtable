@@ -5,6 +5,10 @@
 #include "logging/logging.h"
 #include <terark/fsa/cspptrie.inl>
 #include <terark/num_to_str.hpp>
+#if defined(OS_LINUX)
+  #include <linux/mman.h>
+#endif
+
 const char* git_version_hash_info_cspp_memtable();
 namespace ROCKSDB_NAMESPACE {
 using namespace terark;
@@ -89,6 +93,7 @@ struct CSPPMemTab : public MemTableRep {
     return ret;
   }
   void MarkReadOnly() final;
+  void MarkFlushed() final;
   size_t ApproximateMemoryUsage() final {
     size_t free_sz;
     if (m_trie.is_readonly()) {
@@ -588,6 +593,12 @@ void CSPPMemTab::MarkReadOnly() {
   auto used = m_trie.mem_size_inline();
   as_atomic(m_fac->cumu_used_mem).fetch_add(used, std::memory_order_relaxed);
   m_trie.set_readonly();
+}
+void CSPPMemTab::MarkFlushed() {
+  ROCKSDB_VERIFY(m_trie.is_readonly());
+#if defined(OS_LINUX)
+  madvise(m_trie.mem_get(0), m_trie.mem_capacity(), MADV_SOFT_OFFLINE);
+#endif
 }
 ROCKSDB_REG_Plugin("cspp", CSPPMemTabFactory, MemTableRepFactory);
 ROCKSDB_REG_EasyProxyManip("cspp", CSPPMemTabFactory, MemTableRepFactory);
