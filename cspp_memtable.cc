@@ -597,7 +597,7 @@ void CSPPMemTab::MarkReadOnly() {
 void CSPPMemTab::MarkFlushed() {
   ROCKSDB_VERIFY(m_trie.is_readonly());
 #if defined(OS_LINUX)
-  madvise(m_trie.mem_get(0), m_trie.mem_capacity(), MADV_SOFT_OFFLINE);
+  madvise(m_trie.mem_get(0), m_trie.mem_capacity(), MADV_COLD);
 #endif
 }
 ROCKSDB_REG_Plugin("cspp", CSPPMemTabFactory, MemTableRepFactory);
