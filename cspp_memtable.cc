@@ -36,6 +36,7 @@ struct CSPPMemTab : public MemTableRep {
   bool          m_token_use_idle;
   bool          m_accurate_memsize;
   bool          m_rev;
+  bool          m_is_flushed = false;
   CSPPMemTabFactory* m_fac;
   Logger*  m_log;
   size_t   m_instance_idx;
@@ -525,7 +526,12 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
       size_t cur_qlen = memtab->m_trie.get_token_qlen();
       token_qlen += cur_qlen;
       total_raw_iter += raw_iter;
-      if (memtab->m_trie.is_readonly())
+      if (memtab->m_is_flushed)
+        if (html)
+          detail_qlen|"<strong>("|idx|","|cur_qlen|","|raw_iter|")</strong>, ";
+        else
+          detail_qlen|"**("|idx|","|cur_qlen|","|raw_iter|")**, ";
+      else if (memtab->m_trie.is_readonly())
         detail_qlen|"("|idx|","|cur_qlen|","|raw_iter|"), ";
       else
         if (html)
@@ -597,7 +603,11 @@ void CSPPMemTab::MarkReadOnly() {
 void CSPPMemTab::MarkFlushed() {
   ROCKSDB_VERIFY(m_trie.is_readonly());
 #if defined(OS_LINUX)
-  madvise(m_trie.mem_get(0), m_trie.mem_capacity(), MADV_COLD);
+  if (madvise(m_trie.mem_get(0), m_trie.mem_capacity(), MADV_COLD) != 0) {
+    ROCKS_LOG_WARN(m_log, "MarkFlushed: used = %zd, madvise(cap=%zd, cold) = %m",
+      m_trie.mem_size_inline(), m_trie.mem_capacity());
+  }
+  m_is_flushed = true;
 #endif
 }
 ROCKSDB_REG_Plugin("cspp", CSPPMemTabFactory, MemTableRepFactory);
