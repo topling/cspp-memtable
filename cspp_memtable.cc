@@ -37,6 +37,7 @@ struct CSPPMemTab : public MemTableRep {
   bool          m_accurate_memsize;
   bool          m_rev;
   bool          m_is_flushed = false;
+  bool          m_is_empty = true;
   CSPPMemTabFactory* m_fac;
   Logger*  m_log;
   size_t   m_instance_idx;
@@ -55,6 +56,9 @@ struct CSPPMemTab : public MemTableRep {
     bool insert_for_dup_user_key();
   };
   bool InsertKeyValue(const Slice& ikey, const Slice& val) final {
+    if (UNLIKELY(m_is_empty)) { // must check, avoid write as possible
+      m_is_empty = false;
+    }
     Token* token = m_trie.tls_writer_token_nn<Token>();
     token->acquire(&m_trie);
     auto ret = token->insert_kv(ikey, val);
@@ -152,6 +156,9 @@ struct CSPPMemTab : public MemTableRep {
   };
   void Get(const ReadOptions& ro, const LookupKey& k, void* callback_args,
            bool(*callback_func)(void*, const KeyValuePair*)) final {
+    if (m_is_empty) {
+      return;
+    }
     const Slice ikey = k.internal_key();
     auto token = reader_token();
     token->acquire(&m_trie);
@@ -343,6 +350,10 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     return fstring(ikey.data(), ikey.size() - 8);
   }
   void Seek(const Slice& ikey, const char *memtable_key) final {
+    if (m_tab->m_is_empty) return;
+    if (UNLIKELY(!m_iter)) {
+      m_iter = m_tab->m_trie.new_iter();
+    }
     fstring user_key = GetUserKey(ikey, memtable_key);
     uint64_t find_tag = DecodeFixed64(user_key.end());
     auto& iter = *m_iter;
@@ -368,6 +379,10 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     AppendTag(entry.vec[m_idx = entry.num - 1].tag);
   }
   void SeekForPrev(const Slice& ikey, const char* memtable_key) final {
+    if (m_tab->m_is_empty) return;
+    if (UNLIKELY(!m_iter)) {
+      m_iter = m_tab->m_trie.new_iter();
+    }
     fstring user_key = GetUserKey(ikey, memtable_key);
     uint64_t find_tag = DecodeFixed64(user_key.end());
     auto& iter = *m_iter;
@@ -393,6 +408,10 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     AppendTag(entry.vec[m_idx = 0].tag);
   }
   void SeekToFirst() final {
+    if (m_tab->m_is_empty) return;
+    if (UNLIKELY(!m_iter)) {
+      m_iter = m_tab->m_trie.new_iter();
+    }
     if (UNLIKELY(!(m_rev ? m_iter->seek_end() : m_iter->seek_begin()))) {
       m_idx = -1;
       return; // fail
@@ -401,6 +420,10 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     AppendTag(entry.vec[m_idx = entry.num - 1].tag);
   }
   void SeekToLast() final {
+    if (m_tab->m_is_empty) return;
+    if (UNLIKELY(!m_iter)) {
+      m_iter = m_tab->m_trie.new_iter();
+    }
     if (UNLIKELY(!(m_rev ? m_iter->seek_begin() : m_iter->seek_end()))) {
       m_idx = -1;
       return; // fail
@@ -564,10 +587,12 @@ MemTableRep::Iterator* CSPPMemTab::GetIterator(Arena* a) {
 CSPPMemTab::Iter::Iter(CSPPMemTab* tab) {
   m_tab = tab;
   m_rev = tab->m_rev;
-  m_iter = tab->m_trie.new_iter();
+  m_iter = nullptr;
 }
 CSPPMemTab::Iter::~Iter() noexcept {
-  m_iter->dispose();
+  if (m_iter) {
+    m_iter->dispose();
+  }
   auto factory = m_tab->m_fac;
   as_atomic(factory->live_iter_num).fetch_sub(1, std::memory_order_relaxed);
   as_atomic(m_tab->m_live_iter_num).fetch_sub(1, std::memory_order_relaxed);
