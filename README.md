@@ -1,5 +1,5 @@
 ## **配置方式**
-cspp-memtable 在 SidePlugin 中配置，类名是 `cspp`，配置参数：
+cspp-memtable 在 [SidePlugin](https://github.com/topling/rockside/wiki) 中配置，类名是 `cspp`，配置参数：
 参数名        | 类型  |默认值| 说明
 --------------|------|------|------
 mem_cap       |uint64|2G    |cspp 需要预分配足够的单块内存**地址空间**，这些内存可以只是**保留地址空间，但并未实际分配**。<br/>有效最大值是 16G
