@@ -628,10 +628,15 @@ void CSPPMemTab::MarkReadOnly() {
 void CSPPMemTab::MarkFlushed() {
   ROCKSDB_VERIFY(m_trie.is_readonly());
 #if defined(OS_LINUX)
+ #if defined(MADV_COLD)
   if (madvise(m_trie.mem_get(0), m_trie.mem_capacity(), MADV_COLD) != 0) {
     ROCKS_LOG_WARN(m_log, "MarkFlushed: used = %zd, madvise(cap=%zd, cold) = %m",
       m_trie.mem_size_inline(), m_trie.mem_capacity());
   }
+ #else
+  #pragma message "MADV_COLD is not defined because linux kernel is too old! CSPPMemTab still works OK!"
+  #pragma message "MADV_COLD is for mitigating memory waste by user code pinning DB snapshots for long time"
+ #endif
   m_is_flushed = true;
 #endif
 }
