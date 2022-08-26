@@ -43,7 +43,9 @@ struct CSPPMemTab : public MemTableRep {
   size_t   m_instance_idx;
   uint32_t m_cumu_iter_num = 0;
   uint32_t m_live_iter_num = 0;
+#if defined(ROCKSDB_UNIT_TEST)
   size_t   m_mem_size = 0;
+#endif
   CSPPMemTab(intptr_t cap, bool rev, Logger*, CSPPMemTabFactory*);
   ~CSPPMemTab() noexcept override;
   KeyHandle Allocate(const size_t, char**) final { TERARK_DIE("Bad call"); }
@@ -100,6 +102,7 @@ struct CSPPMemTab : public MemTableRep {
   void MarkReadOnly() final;
   void MarkFlushed() final;
   size_t ApproximateMemoryUsage() final {
+#if defined(ROCKSDB_UNIT_TEST)
     size_t free_sz;
     if (m_trie.is_readonly()) {
       // fast and accurate once become readonly
@@ -136,6 +139,9 @@ struct CSPPMemTab : public MemTableRep {
       maximize(m_mem_size, m_trie.mem_size_inline());
     }
     return m_mem_size;
+#else
+    return m_trie.mem_size_inline();
+#endif
   }
   static constexpr size_t MAX_alloca = 512;
   struct Context : public KeyValuePair {
@@ -515,6 +521,11 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
       ROCKSDB_VERIFY_F((chunk_size & (chunk_size-1)) == 0, "%zd(%#zX)",
                         chunk_size, chunk_size);
       static_cast<string_appender<>&>(m_conf_str)|"&chunk_size="|chunk_size;
+    }
+    else {
+     #if defined(ROCKSDB_UNIT_TEST)
+      m_conf_str += "&chunk_size=1024";
+     #endif
     }
     m_mem_cap = mem_cap;
   }
