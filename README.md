@@ -1,3 +1,4 @@
+## CSPP MemTable 仅支持 BytewiseComparator 和 ReverseBytewiseComparator
 ## **配置方式**
 cspp-memtable 在 [SidePlugin](https://github.com/topling/rockside/wiki) 中配置，类名是 `cspp`，配置参数：
 参数名        | 类型  |默认值| 说明
