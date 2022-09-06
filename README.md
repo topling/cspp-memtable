@@ -20,7 +20,7 @@ MemTableRepFactory:
     params:
       lookahead: 0
 ```
-在 yaml 中定义好 cspp 对象之后，这样[引用该 cspp memtable](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.yaml#L100)
+在 yaml 中定义好 cspp 对象之后，这样[引用该 cspp memtable](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.yaml#L82)
 
 ### **[配置样例：使用 json](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.json#L81-L88)**
 ```json
@@ -41,7 +41,7 @@ MemTableRepFactory:
    }
 }
 ```
-在 json 中定义好 cspp 对象之后，这样[引用该 cspp memtable](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.json#L126)
+在 json 中定义好 cspp 对象之后，这样[引用该 cspp memtable](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.json#L102)
 ## **memtablerep_bench**
 ToplingDB 在 RocksDB 的 memtablerep_bench 中加入了 cspp，以下脚本对比 skiplist 和 cspp（linux 下必须保证设置了足够的 `vm.nr_hugepages`）
 ```bash
