@@ -61,7 +61,11 @@ make DEBUG_LEVEL=0 memtablerep_bench -j`nproc`
   * 在 DB 中使用 CSPP，调用链开销更大，即便如此，最终的加速比也是非常显著
 
 ## **背景**
+> 以下文档主要完成于 2018 年，之后进行了小幅修改和添加注解。
+
 在 MyRocks 的一个场景，MyRocks(RocksDB+MySQL) 的表现远不如预期，写入速度甚至只有 InnoDB 的 70%。这是我们万万不能接受的一个结果，经过仔细排查，我们发现，SkipList 相关的时间开销（主要是 Comparator 耗时）占了 60% 以上！
+
+> 现在（2022-10-24），[MyTopling](https://github.com/topling/mytopling) 对 MyRocks 和 RocksDB 的 TransactionDB 进行了重大的优化，完全重写了关键代码，综合性能提升了 5 倍以上，部分场景性能提升 20 倍以上。
 
 在这个场景中，数据条目数量非常大（20 多亿条），但表的结构很简单，类似这样：
 ```sql
@@ -95,8 +99,8 @@ CREATE TABLE Counting(
 
 架构上的改进，如果没有高效的实现来验证，总是缺乏一些说服力，我们经过不懈的努力，在算法层面获得了 8 倍以上的性能提升，同时 MemTable 的内存用量还大大降低。当然，这个提升，在整个系统层面会被其它部分拖后腿，最终效果是：在 MyRocks 中的一些场景下，我们可以获得 70% 以上的性能提升。
 
-## 所以我们从头实现了一个 [CSPP](Crash-Safe-Parallel-Patricia)
-基于 CSPP，我们实现了 CSPPMemTab，设计上，CSPP 是 DFA 体系的一员，和 RocksDB 完全独立，也就是说，CSPPMemTab 把 [CSPP](Crash-Safe-Parallel-Patricia) 作为一个基本构造块，CSPPMemTab 是 [CSPP](Crash-Safe-Parallel-Patricia) 到 RocksDB MemTable 的适配层。
+## 所以我们从头实现了一个 [CSPP](https://github.com/topling/rockside/wiki/Crash-Safe-Parallel-Patricia)
+基于 CSPP，我们实现了 CSPPMemTab，设计上，CSPP 是 DFA 体系的一员，和 RocksDB 完全独立，也就是说，CSPPMemTab 把 [CSPP](https://github.com/topling/rockside/wiki/Crash-Safe-Parallel-Patricia) 作为一个基本构造块，CSPPMemTab 是 [CSPP](https://github.com/topling/rockside/wiki/Crash-Safe-Parallel-Patricia) 到 RocksDB MemTable 的适配层。
 
-## [[Comparator 问题 | Key Comparator]]
+## [Comparator 问题](https://github.com/krareT/trkdb/wiki/Key-Comparator)
 作为一个 Trie，它里面的 Key 对外部观察者而言只能是字典序，自然，CSPPMemTab 也只能支持 BytewiseComparator（和 Reverse Bytewise）。
