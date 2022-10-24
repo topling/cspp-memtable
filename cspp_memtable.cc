@@ -143,7 +143,6 @@ struct CSPPMemTab : public MemTableRep {
     return m_trie.mem_size_inline();
 #endif
   }
-  static constexpr size_t MAX_alloca = 512;
   struct Context : public KeyValuePair {
     Slice GetKey() const final { return {ikey_buf, ikey_len}; }
     Slice GetValue() const final { return GetLengthPrefixedSlice(enc_valptr); }
@@ -155,7 +154,6 @@ struct CSPPMemTab : public MemTableRep {
       ikey_len = ikey.size_;
       memcpy(buf, ikey.data_, ikey.size_ - 8);
     }
-    ~Context() override { if (ikey_len > MAX_alloca) free(ikey_buf); }
     char*  ikey_buf;
     size_t ikey_len;
     const char* enc_valptr = nullptr; // prefixed len encoded value ptr
@@ -176,8 +174,7 @@ struct CSPPMemTab : public MemTableRep {
     auto vec_pin = (VecPin*)m_trie.mem_get(vec_pin_pos);
     size_t num = vec_pin->num & ~LOCK_FLAG;
     auto entry = (Entry*)m_trie.mem_get(vec_pin->pos);
-    Context ctx(ikey, ikey.size_ > MAX_alloca ? malloc(ikey.size_)
-                                              : alloca(ikey.size_));
+    Context ctx(ikey, alloca(ikey.size_));
     uint64_t find_tag = DecodeFixed64(ikey.data_ + ikey.size_ - 8);
     intptr_t idx = upper_bound_0(entry, num, find_tag);
     if (ro.just_check_key_exists) {
