@@ -547,7 +547,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     size_t token_qlen = 0;
     size_t total_raw_iter = 0;
     string_appender<> detail_qlen;
-    detail_qlen.reserve(4096);
+    detail_qlen.reserve(128*m_all.size());
     detail_qlen << "[ ";
     m_mtx.lock();
     for (auto memtab : m_all) {
@@ -580,6 +580,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_SIZE(djs, live_used_mem);
     ROCKSDB_JSON_SET_PROP(djs, token_qlen);
     ROCKSDB_JSON_SET_PROP(djs, total_raw_iter);
+    djs["comment"] = "detail_qlen: (idx, qlen, raw_iter_num)";
     ROCKSDB_JSON_SET_PROP(djs, detail_qlen);
     JS_CSPPMemTab_AddVersion(djs, html);
     return JsonToString(djs, d);
