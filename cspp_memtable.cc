@@ -14,7 +14,10 @@ namespace ROCKSDB_NAMESPACE {
 using namespace terark;
 static const uint32_t LOCK_FLAG = uint32_t(1) << 31;
 struct CSPPMemTabFactory;
-struct CSPPMemTab : public MemTableRep {
+struct MemTabLinkListNode {
+  MemTabLinkListNode *m_prev, *m_next;
+};
+struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
 #pragma pack(push, 4)
   struct Entry {
     uint64_t tag;
@@ -473,9 +476,13 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
   uint64_t cumu_used_mem = 0;
-  std::vector<CSPPMemTab*> m_all;
+  size_t m_memtab_num = 0;
+  MemTabLinkListNode m_head;
   mutable std::mutex m_mtx;
-  CSPPMemTabFactory(const json& js, const SidePluginRepo& r) { Update({}, js, r); }
+  CSPPMemTabFactory(const json& js, const SidePluginRepo& r) {
+    m_head.m_next = m_head.m_prev = &m_head;
+    Update({}, js, r);
+  }
   using MemTableRepFactory::CreateMemTableRep;
   MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator& cmp,
                                  Allocator*, const SliceTransform*,
@@ -547,10 +554,11 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     size_t token_qlen = 0;
     size_t total_raw_iter = 0;
     string_appender<> detail_qlen;
-    detail_qlen.reserve(128*m_all.size());
+    detail_qlen.reserve(128*m_memtab_num);
     detail_qlen << "[ ";
     m_mtx.lock();
-    for (auto memtab : m_all) {
+    for (auto node = m_head.m_next; node != &m_head; node = node->m_next) {
+      auto memtab = static_cast<CSPPMemTab*>(node);
       live_used_mem += memtab->m_trie.mem_size_inline();
       size_t idx = memtab->m_instance_idx;
       size_t raw_iter = memtab->m_trie.live_iter_num();
@@ -580,7 +588,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_SIZE(djs, live_used_mem);
     ROCKSDB_JSON_SET_PROP(djs, token_qlen);
     ROCKSDB_JSON_SET_PROP(djs, total_raw_iter);
-    djs["comment"] = "detail_qlen: (idx, qlen, raw_iter_num)";
+    djs["comment"] = "(idx, qlen, raw_iter_num), strong: flushed, normal: readonly, em: active";
     ROCKSDB_JSON_SET_PROP(djs, detail_qlen);
     JS_CSPPMemTab_AddVersion(djs, html);
     return JsonToString(djs, d);
@@ -619,14 +627,20 @@ CSPPMemTab::CSPPMemTab(intptr_t cap, bool rev, Logger* log, CSPPMemTabFactory* f
   as_atomic(f->live_num).fetch_add(1, std::memory_order_relaxed);
   m_instance_idx = as_atomic(f->cumu_num).fetch_add(1, std::memory_order_relaxed);
   f->m_mtx.lock();
-  f->m_all.push_back(this);
+  f->m_memtab_num++;
+  m_next = &f->m_head; // insert 'this' at linked list tail
+  m_prev = f->m_head.m_prev;
+  m_next->m_prev = this;
+  m_prev->m_next = this;
   f->m_mtx.unlock();
 }
 CSPPMemTab::~CSPPMemTab() noexcept {
   TERARK_ASSERT_EZ(m_live_iter_num);
   as_atomic(m_fac->live_num).fetch_sub(1, std::memory_order_relaxed);
   m_fac->m_mtx.lock();
-  m_fac->m_all.erase(std::find(m_fac->m_all.begin(), m_fac->m_all.end(), this));
+  m_fac->m_memtab_num--;
+  m_next->m_prev = m_prev; // remove 'this' from linked list
+  m_prev->m_next = m_next;
   m_fac->m_mtx.unlock();
 }
 void CSPPMemTab::MarkReadOnly() {
