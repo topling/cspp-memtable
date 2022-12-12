@@ -440,7 +440,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   bool IsKeyPinned() const final { return false; }
 };
 void JS_CSPPMemTab_AddVersion(json& djs, bool html) {
-  auto& ver = djs["version"];
+  auto& ver = djs["cspp-memtable"];
   const char* git_ver = git_version_hash_info_cspp_memtable();
   if (html) {
     std::string topling_rocks = HtmlEscapeMin(strstr(git_ver, "commit ") + strlen("commit "));
