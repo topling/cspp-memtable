@@ -1,4 +1,7 @@
 ## CSPP MemTable 仅支持 BytewiseComparator 和 ReverseBytewiseComparator
+在 [ToplingDB](https://github.com/topling/toplingdb) 中，CSPP MemTable 在形式上是作为一个 SidePlugin 实现的，也就是说，要使用 CSPP MemTable，用户代码不需要任何修改，只需要改 json/yaml 配置文件。
+
+编译 ToplingDB 时，本模块(CSPP MemTable)由 ToplingDB 的 Makefile 中从 github 自动 clone 下来
 ## **配置方式**
 cspp-memtable 在 [SidePlugin](https://github.com/topling/rockside/wiki) 中配置，类名是 `cspp`，配置参数：
 参数名        | 类型  |默认值| 说明
