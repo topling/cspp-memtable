@@ -350,17 +350,12 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     }
     AppendTag(entry.vec[m_idx].tag);
   }
-  static fstring GetUserKey(Slice ikey, const char *memtable_key) {
-    if (memtable_key != nullptr)
-      ikey = GetLengthPrefixedSlice(memtable_key);
-    return fstring(ikey.data(), ikey.size() - 8);
-  }
-  void Seek(const Slice& ikey, const char *memtable_key) final {
+  void Seek(const Slice& ikey, const char*) final {
     if (m_tab->m_is_empty) return;
     if (UNLIKELY(!m_iter)) {
       m_iter = m_tab->m_trie.new_iter();
     }
-    fstring user_key = GetUserKey(ikey, memtable_key);
+    fstring user_key = ExtractUserKey(ikey);
     uint64_t find_tag = DecodeFixed64(user_key.end());
     auto& iter = *m_iter;
     if (UNLIKELY(!(m_rev ? iter.seek_rev_lower_bound(user_key)
@@ -384,12 +379,12 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     assert((iter.word() > user_key) ^ m_rev);
     AppendTag(entry.vec[m_idx = entry.num - 1].tag);
   }
-  void SeekForPrev(const Slice& ikey, const char* memtable_key) final {
+  void SeekForPrev(const Slice& ikey, const char*) final {
     if (m_tab->m_is_empty) return;
     if (UNLIKELY(!m_iter)) {
       m_iter = m_tab->m_trie.new_iter();
     }
-    fstring user_key = GetUserKey(ikey, memtable_key);
+    fstring user_key = ExtractUserKey(ikey);
     uint64_t find_tag = DecodeFixed64(user_key.end());
     auto& iter = *m_iter;
     if (UNLIKELY(!(m_rev ? iter.seek_lower_bound(user_key)
