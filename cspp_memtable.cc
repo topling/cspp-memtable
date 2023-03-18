@@ -231,7 +231,7 @@ bool CSPPMemTab::Token::insert_kv(fstring ikey, Slice val) {
   uint32_t value_storage = 0;
   if (m_trie->insert(user_key, &value_storage, this)) {
     size_t mem_cap = static_cast<MainPatricia*>(m_trie)->mem_capacity();
-    TERARK_VERIFY_F(this->value() != nullptr, "OOM: mem_cap=%zd is too small", mem_cap);
+    TERARK_VERIFY_F(has_value(), "OOM: mem_cap=%zd is too small", mem_cap);
     return true; // done: value insert has been handled in init_value
   }
   return insert_for_dup_user_key();
