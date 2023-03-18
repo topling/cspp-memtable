@@ -95,7 +95,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       return false;
     }
     uint64_t find_tag = DecodeFixed64(user_key.end());
-    auto vec_pin = (VecPin*)m_trie.mem_get(*(uint32_t*)token->value());
+    auto vec_pin = (VecPin*)m_trie.mem_get(m_trie.value_of<uint32_t>(*token));
     auto num = vec_pin->num & ~LOCK_FLAG;
     auto entry = (Entry*)m_trie.mem_get(vec_pin->pos);
     bool ret = binary_search_0(entry, num, find_tag);
@@ -173,7 +173,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       m_token_use_idle ? token->idle() : token->release();
       return;
     }
-    uint32_t vec_pin_pos = *(uint32_t*)token->value();
+    uint32_t vec_pin_pos = m_trie.value_of<uint32_t>(*token);
     auto vec_pin = (VecPin*)m_trie.mem_get(vec_pin_pos);
     size_t num = vec_pin->num & ~LOCK_FLAG;
     auto entry = (Entry*)m_trie.mem_get(vec_pin->pos);
@@ -238,7 +238,7 @@ bool CSPPMemTab::Token::insert_kv(fstring ikey, Slice val) {
 }
 bool CSPPMemTab::Token::insert_for_dup_user_key() {
   auto trie = static_cast<MainPatricia*>(m_trie);
-  auto vec_pin_pos = *(uint32_t*)this->value();
+  auto vec_pin_pos = trie->value_of<uint32_t>(*this);
   auto vec_pin = (VecPin*)trie->mem_get(vec_pin_pos);
   uint32_t num;
   while (LOCK_FLAG & (num = as_atomic(vec_pin->num)
@@ -296,7 +296,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   struct EntryVec { int num; const Entry* vec; };
   terark_forceinline EntryVec GetEntryVec() const {
     auto trie = &m_tab->m_trie;
-    auto vec_pin = (VecPin*)trie->mem_get(*(uint32_t*)m_iter->value());
+    auto vec_pin = (VecPin*)trie->mem_get(trie->value_of<uint32_t>(*m_iter));
     auto entry_num = int(vec_pin->num & ~LOCK_FLAG);
     auto entry_vec = (Entry*)trie->mem_get(vec_pin->pos);
     return { entry_num, entry_vec };
@@ -316,7 +316,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   Slice GetValue() const final {
     TERARK_ASSERT_GE(m_idx, 0);
     auto trie = &m_tab->m_trie;
-    auto vec_pin = (VecPin*)trie->mem_get(*(uint32_t*)m_iter->value());
+    auto vec_pin = (VecPin*)trie->mem_get(trie->value_of<uint32_t>(*m_iter));
     auto entry = (Entry*)trie->mem_get(vec_pin->pos);
     auto enc_val_pos = entry[m_idx].pos;
     return GetLengthPrefixedSlice((const char*)trie->mem_get(enc_val_pos));
