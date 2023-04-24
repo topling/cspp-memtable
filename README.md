@@ -48,8 +48,14 @@ MemTableRepFactory:
 在 json 中定义好 cspp 对象之后，这样[引用该 cspp memtable](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.json#L102)
 ## **memtablerep_bench**
 ToplingDB 在 RocksDB 的 memtablerep_bench 中加入了 cspp，以下脚本对比 skiplist 和 cspp（linux 下必须保证设置了足够的 `vm.nr_hugepages`）
+> linux kernel 5.14 以上可以自动检测 vm.nr_hugepages 不足导致的失败，旧版内核在 vm.nr_hugepages 不足时会发生 segfault 或 bus error，
+> 将 "use_hugepage": `true` 改成 `false` 即可，代价是性能会有少许损失。
 ```bash
+sudo yum -y install git libaio-devel gcc-c++ gflags-devel zlib-devel bzip2-devel libcurl-devel liburing-devel
+git clone https://github.com/topling/toplingdb
+cd toplingdb
 make DEBUG_LEVEL=0 memtablerep_bench -j`nproc`
+export LD_LIBRARY_PATH=.:`find sideplugin -name lib_shared`:${LD_LIBRARY_PATH}
 ./memtablerep_bench -benchmarks=fillrandom,readrandom,readwrite \
   -memtablerep=skiplist -huge_page_tlb_size=2097152 \
   -write_buffer_size=536870912 -item_size=0 -num_operations=10000000
@@ -59,9 +65,8 @@ make DEBUG_LEVEL=0 memtablerep_bench -j`nproc`
 ```
 * 注意：-item_size=0 表示将 value 的长度设为 0，从而去除 memcpy value 的影响
 * 注意：测试结果中最有参考价值的指标是 **write us/op** 和 **read us/op**
-* 注意：测试结果表现出的性能差异包含了调用链开销，如果去除调用链开销，性能的差异会更大
-  * 调用链开销是固定的，在 skiplist 中占比不大，但在 cspp 中占比就很大了(~40%)
-  * 在 DB 中使用 CSPP，调用链开销更大，即便如此，最终的加速比也是非常显著
+* 注意：memtablerep_bench 仅测试 MemTableRep 的性能，调用链的开销很低
+  * 如果在 DB 中使用 CSPP，主要耗时在于调用链开销，即便如此，最终的加速比也非常显著
 
 ## **背景**
 > 以下文档主要完成于 2018 年，之后进行了小幅修改和添加注解。
