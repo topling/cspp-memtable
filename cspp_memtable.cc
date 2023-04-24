@@ -195,6 +195,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     }
     m_token_use_idle ? token->idle() : token->release();
   }
+  bool NeedsUserKeyCompareInGet() const final { return false; }
   MemTableRep::Iterator* GetIterator(Arena*) final;
   struct Iter;
 };
