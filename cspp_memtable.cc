@@ -147,22 +147,16 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
 #endif
   }
   struct Context : public KeyValuePair {
-    Slice GetKey() const final { return {ikey_buf, ikey_len}; }
-    Slice GetValue() const final { return GetLengthPrefixedSlice(enc_valptr); }
-    std::pair<Slice, Slice> GetKeyValue() const final {
-      return { {ikey_buf, ikey_len}, GetLengthPrefixedSlice(enc_valptr) };
+    inline static Slice cp(Slice ikey, void* buf) {
+      memcpy(buf, ikey.data_, ikey.size_ - 8); // just copy user key
+      return Slice((char*)buf, ikey.size_); // ikey: tag is pending
     }
-    Context(Slice ikey, void* buf) {
-      ikey_buf = (char*)buf;
-      ikey_len = ikey.size_;
-      memcpy(buf, ikey.data_, ikey.size_ - 8);
-    }
-    char*  ikey_buf;
-    size_t ikey_len;
-    const char* enc_valptr = nullptr; // prefixed len encoded value ptr
+    Context(Slice ikey, void* buf) : KeyValuePair(cp(ikey, buf), Slice()) {}
+    void SetTag(uint64_t tag) { memcpy((char*)ikey.end() - 8, &tag, 8); }
   };
+  ROCKSDB_FLATTEN
   void Get(const ReadOptions& ro, const LookupKey& k, void* callback_args,
-           bool(*callback_func)(void*, const KeyValuePair*)) final {
+           bool(*callback_func)(void*, const KeyValuePair&)) final {
     if (m_is_empty) {
       return;
     }
@@ -187,16 +181,16 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
           // instruct get_context to stop earlier
           tag = (tag & ~uint64_t(255)) | kTypeValue;
         }
-        memcpy(ctx.ikey_buf + ikey.size_ - 8, &tag, 8);
-        ctx.enc_valptr = ""; // empty value
-        if (!callback_func(callback_args, &ctx))
+        ctx.SetTag(tag);
+        if (!callback_func(callback_args, ctx))
           break;
       }
     }
     else while (idx--) {
-      memcpy(ctx.ikey_buf + ikey.size_ - 8, &entry[idx].tag, 8);
-      ctx.enc_valptr = (const char*)m_trie.mem_get(entry[idx].pos);
-      if (!callback_func(callback_args, &ctx))
+      auto enc_valptr = (const char*)m_trie.mem_get(entry[idx].pos);
+      ctx.SetTag(entry[idx].tag);
+      ctx.value = GetLengthPrefixedSlice(enc_valptr);
+      if (!callback_func(callback_args, ctx))
         break;
     }
     m_token_use_idle ? token->idle() : token->release();
