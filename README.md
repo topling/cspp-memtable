@@ -10,7 +10,7 @@ mem_cap       |uint64|2G    |cspp 需要预分配足够的单块内存**地址�
 use_vm        |bool  |true  |使用 malloc/posix_memalign 时，地址空间可能是已经实际分配的，设置该选项会强制使用 mmap 分配内存，从而保证仅仅是**保留地址空间，但并不实际分配**
 use_hugepage  |bool  |false |使用该选项时，linux 下必须保证设置了足够的 `vm.nr_hugepages`
 token_use_idle|bool  |true  |该选项用来优化 token ring，一般情况下使用默认值即可
-### **[配置样例：使用 yaml](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.yaml#L66-L71)**
+### **[配置样例：使用 yaml](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.yaml#L69-L74)**
 ```yaml
 MemTableRepFactory:
   cspp:
@@ -26,7 +26,7 @@ MemTableRepFactory:
 ```
 在 yaml 中定义好 cspp 对象之后，这样[引用该 cspp memtable](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.yaml#L82)
 
-### **[配置样例：使用 json](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.json#L81-L88)**
+### **[配置样例：使用 json](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.json#L85-L93)**
 ```json
 "MemTableRepFactory": {
    "cspp": {
@@ -63,6 +63,7 @@ export LD_LIBRARY_PATH=.:`find sideplugin -name lib_shared`:${LD_LIBRARY_PATH}
   -memtablerep='cspp:{"mem_cap":"16G","use_hugepage":true}' \
   -write_buffer_size=536870912 -item_size=0 -num_operations=10000000
 ```
+该测试结果一般可体现出 CSPP 相比 SkipList，**写性能有 6 倍的优势，读性能 有 8 倍的优势**。
 * 注意：-item_size=0 表示将 value 的长度设为 0，从而去除 memcpy value 的影响
 * 注意：测试结果中最有参考价值的指标是 **write us/op** 和 **read us/op**
 * 注意：memtablerep_bench 仅测试 MemTableRep 的性能，调用链的开销很低
