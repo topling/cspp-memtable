@@ -319,11 +319,14 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   std::pair<Slice, Slice>
   GetKeyValue() const final { return {GetKey(), GetValue()}; }
   void Next() final {
+    NextAndCheckValid(); // ignore return value
+  }
+  bool NextAndCheckValid() final {
     TERARK_ASSERT_GE(m_idx, 0);
     if (m_idx-- == 0) {
       if (UNLIKELY(!(m_rev ? m_iter->decr() : m_iter->incr()))) {
         TERARK_ASSERT_LT(m_idx, 0);
-        return; // fail
+        return false; // fail
       }
       auto entry = GetEntryVec();
       AppendTag(entry.vec[m_idx = entry.num - 1].tag);
@@ -331,19 +334,36 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
       auto entry = GetEntryVec();
       AppendTag(entry.vec[m_idx].tag);
     }
+    return true;
+  }
+  bool NextAndGetResult(IterateResult* result) {
+    if (LIKELY(NextAndCheckValid())) {
+      result->SetKey(this->GetKey());
+      result->bound_check_result = IterBoundCheck::kUnknown;
+      result->value_prepared = true;
+      result->is_valid = true;
+      return true;
+    } else {
+      result->is_valid = false;
+      return false;
+    }
   }
   void Prev() final {
+    PrevAndCheckValid(); // ignore return value
+  }
+  bool PrevAndCheckValid() final {
     TERARK_ASSERT_GE(m_idx, 0);
     auto entry = GetEntryVec();
     if (++m_idx == entry.num) {
       if (UNLIKELY(!(m_rev ? m_iter->incr() : m_iter->decr()))) {
         m_idx = -1;
-        return; // fail
+        return false; // fail
       }
       entry = GetEntryVec();
       m_idx = 0;
     }
     AppendTag(entry.vec[m_idx].tag);
+    return true;
   }
   void Seek(const Slice& ikey, const char*) final {
     if (m_tab->m_is_empty) return;
