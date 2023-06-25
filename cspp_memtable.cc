@@ -79,15 +79,15 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       m_is_empty = false;
     }
     Token* token;
-    // SkipListMemTable use hint as last insertion position,
-    // We use hint as the tls writer token ptr
+    // SkipListMemTable use `*hint` as last insertion position,
+    // We use `*hint` as the tls writer token ptr with flag
     if (hint) { // to avoid calling of tls_writer_token_nn
-      if (*hint) {
-        assert(size_t(*hint) & 1);
-        token = (Token*)(size_t(*hint) & ~size_t(1));
+      if (auto& ptr_with_flag = (uintptr_t&)(*hint)) {
+        assert(ptr_with_flag & 1);
+        token = (Token*)(ptr_with_flag & ~uintptr_t(1));
       } else {
         token = m_trie.tls_writer_token_nn<Token>();
-        (size_t&)(*hint) = size_t(token) | 1; // indicate don't delete *hint
+        ptr_with_flag = uintptr_t(token) | 1; // indicate don't delete `*hint`
       }
     } else {
       token = m_trie.tls_writer_token_nn<Token>();
