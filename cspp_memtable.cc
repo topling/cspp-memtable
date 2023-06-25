@@ -167,12 +167,12 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     return m_trie.mem_size_inline();
 #endif
   }
-  struct Context : public KeyValuePair {
+  struct KeyValueForGet : public KeyValuePair {
     inline static Slice cp(Slice ikey, void* buf) {
       memcpy(buf, ikey.data_, ikey.size_ - 8); // just copy user key
       return Slice((char*)buf, ikey.size_); // ikey: tag is pending
     }
-    Context(Slice ikey, void* buf) : KeyValuePair(cp(ikey, buf), Slice()) {}
+    KeyValueForGet(Slice ikey, void* buf) : KeyValuePair(cp(ikey, buf), Slice()) {}
     void SetTag(uint64_t tag) { memcpy((char*)ikey.end() - 8, &tag, 8); }
   };
   ROCKSDB_FLATTEN
@@ -192,7 +192,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     auto vec_pin = (VecPin*)m_trie.mem_get(vec_pin_pos);
     size_t num = vec_pin->num & ~LOCK_FLAG;
     auto entry = (Entry*)m_trie.mem_get(vec_pin->pos);
-    Context ctx(ikey, alloca(ikey.size_));
+    KeyValueForGet key_val(ikey, alloca(ikey.size_));
     uint64_t find_tag = DecodeFixed64(ikey.data_ + ikey.size_ - 8);
     intptr_t idx = upper_bound_0(entry, num, find_tag);
     if (ro.just_check_key_exists) {
@@ -202,16 +202,16 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
           // instruct get_context to stop earlier
           tag = (tag & ~uint64_t(255)) | kTypeValue;
         }
-        ctx.SetTag(tag);
-        if (!callback_func(callback_args, ctx))
+        key_val.SetTag(tag);
+        if (!callback_func(callback_args, key_val))
           break;
       }
     }
     else while (idx--) {
       auto enc_valptr = (const char*)m_trie.mem_get(entry[idx].pos);
-      ctx.SetTag(entry[idx].tag);
-      ctx.value = GetLengthPrefixedSlice(enc_valptr);
-      if (!callback_func(callback_args, ctx))
+      key_val.SetTag(entry[idx].tag);
+      key_val.value = GetLengthPrefixedSlice(enc_valptr);
+      if (!callback_func(callback_args, key_val))
         break;
     }
     m_token_use_idle ? token->idle() : token->release();
