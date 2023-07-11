@@ -500,7 +500,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   intptr_t m_mem_cap = 2LL << 30;
   bool   use_vm = true;
   HugePageEnum  use_hugepage = HugePageEnum::kNone;
-  bool   read_by_writer_token = false;
+  bool   read_by_writer_token = true;
   bool   token_use_idle = true;
   bool   accurate_memsize = false; // mainly for debug and unit test
   size_t chunk_size = 2 << 20; // 2MiB
