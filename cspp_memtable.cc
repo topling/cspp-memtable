@@ -57,16 +57,16 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     uint64_t tag_ = UINT64_MAX;
     Slice val_;
     bool init_value(void* trie_valptr, size_t trie_valsize) noexcept final;
-    bool insert_kv(fstring ikey, Slice val);
     bool insert_for_dup_user_key();
   };
+  bool insert_kv(fstring ikey, const Slice& val, Token*);
   bool InsertKeyValue(const Slice& ikey, const Slice& val) final {
     if (UNLIKELY(m_is_empty)) { // must check, avoid write as possible
       m_is_empty = false;
     }
     Token* token = m_trie.tls_writer_token_nn<Token>();
     token->acquire(&m_trie);
-    auto ret = token->insert_kv(ikey, val);
+    auto ret = insert_kv(ikey, val, token);
     m_token_use_idle ? token->idle() : token->release();
     return ret;
   }
@@ -94,7 +94,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       token = m_trie.tls_writer_token_nn<Token>();
     }
     token->acquire(&m_trie);
-    auto ret = token->insert_kv(k, v);
+    auto ret = insert_kv(k, v, token);
     m_token_use_idle ? token->idle() : token->release();
     return ret;
   }
@@ -241,17 +241,18 @@ bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
   *(uint32_t*)trie_valptr = (uint32_t)vec_pin_pos;
   return true;
 }
-bool CSPPMemTab::Token::insert_kv(fstring ikey, Slice val) {
+terark_forceinline
+bool CSPPMemTab::insert_kv(fstring ikey, const Slice& val, Token* tok) {
   fstring user_key(ikey.data(), ikey.size() - 8);
-  tag_ = DecodeFixed64(user_key.end());
-  val_ = val;
+  tok->tag_ = DecodeFixed64(user_key.end());
+  tok->val_ = val;
   uint32_t value_storage = 0;
-  if (m_trie->insert(user_key, &value_storage, this)) {
-    TERARK_VERIFY_F(has_value(), "OOM: mem_cap=%zd is too small",
-                    static_cast<MainPatricia*>(m_trie)->mem_capacity());
+  if (LIKELY(m_trie.insert(user_key, &value_storage, tok))) {
+    TERARK_VERIFY_F(tok->has_value(), "OOM: mem_cap=%zd is too small",
+                    m_trie.mem_capacity());
     return true; // done: value insert has been handled in init_value
   }
-  return insert_for_dup_user_key();
+  return tok->insert_for_dup_user_key();
 }
 bool CSPPMemTab::Token::insert_for_dup_user_key() {
   auto trie = static_cast<MainPatricia*>(m_trie);
