@@ -85,6 +85,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       if (auto& ptr_with_flag = (uintptr_t&)(*hint)) {
         assert(ptr_with_flag & 1);
         token = (Token*)(ptr_with_flag & ~uintptr_t(1));
+        assert(m_trie.tls_writer_token_nn<Token>() == token);
       } else {
         token = m_trie.tls_writer_token_nn<Token>();
         ptr_with_flag = uintptr_t(token) | 1; // indicate don't delete `*hint`
