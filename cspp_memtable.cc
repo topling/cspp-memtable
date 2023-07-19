@@ -588,6 +588,14 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     auto avg_used_mem = cumu_num ? cumu_used_mem / cumu_num : 0;
     bool html = JsonSmartBool(d, "html");
     json djs;
+    if (html) {
+      const auto document =
+        "<a href='https://github.com/topling/cspp-memtab/blob/main/README-en.md'>Document(English)</a>"
+        " | "
+        "<a href='https://github.com/topling/cspp-memtab/blob/main/README.md'>文档（中文）</a>"
+        ;
+      ROCKSDB_JSON_SET_PROP(djs, document);
+    }
     ROCKSDB_JSON_SET_SIZE(djs, mem_cap);
     ROCKSDB_JSON_SET_SIZE(djs, chunk_size);
     ROCKSDB_JSON_SET_PROP(djs, use_vm);
