@@ -3,6 +3,12 @@
 #include "db/memtable.h"
 #include "topling/side_plugin_factory.h"
 #include "logging/logging.h"
+
+// dump cspp memtable as sst
+#include "table/table_builder.h"
+#include "table/table_reader.h"
+#include "rocksdb/table.h"
+
 #include <terark/fsa/cspptrie.inl>
 #include <terark/num_to_str.hpp>
 #if defined(OS_LINUX)
@@ -342,13 +348,15 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   explicit Iter(CSPPMemTab*);
   ~Iter() noexcept override;
   bool Valid() const final { return m_idx >= 0; }
-  const char* key() const final { TERARK_DIE("Bad call"); }
-  Slice GetKey() const final {
+  using MemTableRep::Iterator::Seek;
+  using MemTableRep::Iterator::SeekForPrev;
+  const char* varlen_key() const final { TERARK_DIE("Bad call"); }
+  Slice key() const final {
     TERARK_ASSERT_GE(m_idx, 0);
     fstring user_key = m_iter->word();
     return Slice(user_key.p, user_key.n + 8);
   }
-  Slice GetValue() const final {
+  Slice value() const final {
     TERARK_ASSERT_GE(m_idx, 0);
     auto trie = &m_tab->m_trie;
     auto vec_pin = (VecPin*)trie->mem_get(trie->value_of<uint32_t>(*m_iter));
@@ -357,7 +365,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     return GetLengthPrefixedSlice((const char*)trie->mem_get(enc_val_pos));
   }
   std::pair<Slice, Slice>
-  GetKeyValue() const final { return {GetKey(), GetValue()}; }
+  GetKeyValue() const final { return {key(), value()}; }
   void Next() final {
     NextAndCheckValid(); // ignore return value
   }
@@ -378,7 +386,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   }
   bool NextAndGetResult(IterateResult* result) {
     if (LIKELY(NextAndCheckValid())) {
-      result->SetKey(this->GetKey());
+      result->SetKey(this->key());
       result->bound_check_result = IterBoundCheck::kUnknown;
       result->value_prepared = true;
       result->is_valid = true;
