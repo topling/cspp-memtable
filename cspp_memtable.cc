@@ -5,9 +5,10 @@
 #include "logging/logging.h"
 
 // dump cspp memtable as sst
-#include "table/table_builder.h"
-#include "table/table_reader.h"
-#include "rocksdb/table.h"
+#include "file/filename.h"
+#include "table/top_table_builder.h"
+#include "table/top_table_reader.h"
+#include "topling/builtin_table_factory.h"
 
 #include <terark/fsa/cspptrie.inl>
 #include <terark/num_to_str.hpp>
@@ -18,6 +19,7 @@
 const char* git_version_hash_info_cspp_memtable();
 namespace ROCKSDB_NAMESPACE {
 using namespace terark;
+ROCKSDB_ENUM_CLASS(ConvertKind, uint08_t, kDontConvert, kDumpMem, kWriteMmap);
 static const uint32_t LOCK_FLAG = uint32_t(1) << 31;
 struct CSPPMemTabFactory;
 struct MemTabLinkListNode {
@@ -47,6 +49,9 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   bool          m_rev;
   bool          m_is_flushed = false;
   bool          m_is_empty = true;
+  bool          m_is_sst : 1;
+  bool          m_has_converted_to_sst : 1;
+  ConvertKind   m_convert_to_sst;
   CSPPMemTabFactory* m_fac;
   Logger*  m_log;
   size_t   m_instance_idx;
@@ -55,7 +60,10 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
 #if defined(ROCKSDB_UNIT_TEST)
   size_t   m_mem_size = 0;
 #endif
-  CSPPMemTab(intptr_t cap, bool rev, Logger*, CSPPMemTabFactory*);
+  CSPPMemTab(intptr_t cap, bool rev, Logger*, CSPPMemTabFactory*,
+             size_t instance_idx, ConvertKind, fstring fpath_or_conf);
+  CSPPMemTab(bool rev, Logger*, CSPPMemTabFactory*, size_t instance_idx);
+  void init(bool rev, Logger*, CSPPMemTabFactory*);
   ~CSPPMemTab() noexcept override;
   KeyHandle Allocate(const size_t, char**) final { TERARK_DIE("Bad call"); }
   void Insert(KeyHandle) final { TERARK_DIE("Bad call"); }
@@ -132,6 +140,10 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   }
   void MarkReadOnly() final;
   void MarkFlushed() final;
+  bool SupportConvertToSST() const final {
+    return ConvertKind::kDontConvert != m_convert_to_sst;
+  }
+  Status ConvertToSST(FileMetaData*, const TableBuilderOptions&) final;
   size_t ApproximateMemoryUsage() final {
 #if defined(ROCKSDB_UNIT_TEST)
     size_t free_sz;
@@ -223,6 +235,53 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     }
     m_token_use_idle ? token->idle() : token->release();
   }
+  Status SST_Get(const ReadOptions& ro,  const Slice& ikey,
+                 GetContext* get_context) const {
+    ROCKSDB_ASSERT_GE(ikey.size(), kNumInternalBytes);
+    ParsedInternalKey pikey(ikey);
+    Status st;
+    MainPatricia::SingleReaderToken token(&m_trie);
+    if (!m_trie.lookup(pikey.user_key, &token)) {
+      return st;
+    }
+    const SequenceNumber find_tag = pikey.GetTag();
+    Cleanable noop_pinner;
+    Cleanable* pinner = ro.pinning_tls ? &noop_pinner : nullptr;
+    uint32_t vec_pin_pos = m_trie.value_of<uint32_t>(token);
+    auto vec_pin = (VecPin*)m_trie.mem_get(vec_pin_pos);
+    size_t num = vec_pin->num & ~LOCK_FLAG;
+    auto entry = (Entry*)m_trie.mem_get(vec_pin->pos);
+    intptr_t idx = upper_bound_0(entry, num, find_tag);
+    if (ro.just_check_key_exists) {
+      while (idx--) {
+        uint64_t tag = entry[idx].tag;
+        UnPackSequenceAndType(tag, &pikey.sequence, &pikey.type);
+        if (pikey.type == kTypeMerge) {
+          // instruct get_context to stop earlier
+          pikey.type = kTypeValue;
+        }
+        if (!get_context->SaveValue(pikey, "", pinner)) {
+          return st;
+        }
+      }
+    }
+    else while (idx--) {
+      uint64_t tag = entry[idx].tag;
+      UnPackSequenceAndType(tag, &pikey.sequence, &pikey.type);
+      auto enc_valptr = (const char*)m_trie.mem_get(entry[idx].pos);
+      Slice value = GetLengthPrefixedSlice(enc_valptr);
+      if (!get_context->SaveValue(pikey, value, pinner)) {
+        return st;
+      }
+    }
+    return st;
+  }
+  bool GetRandomInternalKeysAppend(size_t num, std::vector<std::string>* output) const;
+  std::string FirstInternalKey(Slice user_key, MainPatricia::TokenBase&) const;
+#if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 70060
+  using Anchor = TableReader::Anchor;
+  Status ApproximateKeyAnchors(const ReadOptions&, std::vector<Anchor>&) const;
+#endif
   bool NeedsUserKeyCompareInGet() const final { return false; }
   MemTableRep::Iterator* GetIterator(Arena*) final;
   struct Iter;
@@ -271,8 +330,8 @@ bool CSPPMemTab::insert_kv(fstring ikey, const Slice& val, Token* tok) {
   tok->val_ = val;
   uint32_t value_storage = 0;
   if (LIKELY(m_trie.insert(user_key, &value_storage, tok))) {
-    TERARK_VERIFY_F(tok->has_value(), "OOM: mem_cap=%zd is too small",
-                    m_trie.mem_capacity());
+    TERARK_VERIFY_S(tok->has_value(), "OOM: mem_cap=%zd is too small: %s",
+                    m_trie.mem_capacity(), m_trie.mmap_fpath());
     return true; // done: value insert has been handled in init_value
   }
   return tok->insert_for_dup_user_key();
@@ -523,13 +582,13 @@ void JS_CSPPMemTab_AddVersion(json& djs, bool html) {
 }
 ROCKSDB_ENUM_CLASS(HugePageEnum, uint8_t, kNone = 0, kMmap = 1, kTransparent = 2);
 struct CSPPMemTabFactory final : public MemTableRepFactory {
-  std::string m_conf_str = "?hugepage=0";
   intptr_t m_mem_cap = 2LL << 30;
   bool   use_vm = true;
   HugePageEnum  use_hugepage = HugePageEnum::kNone;
   bool   read_by_writer_token = true;
   bool   token_use_idle = true;
   bool   accurate_memsize = false; // mainly for debug and unit test
+  ConvertKind convert_to_sst = ConvertKind::kDontConvert;
   size_t chunk_size = 2 << 20; // 2MiB
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
@@ -541,17 +600,38 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     m_head.m_next = m_head.m_prev = &m_head;
     Update({}, js, r);
   }
-  using MemTableRepFactory::CreateMemTableRep;
   MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator& cmp,
                                  Allocator*, const SliceTransform*,
                                  Logger* logger) final {
+    return CreateMemTableRep(std::string(), cmp, nullptr, nullptr, logger, 0);
+  }
+  MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator& cmp,
+                                 Allocator* a, const SliceTransform* s,
+                                 Logger* logger, uint32_t cf_id) final {
+    return CreateMemTableRep(std::string(), cmp, a, s, logger, cf_id);
+  }
+  MemTableRep* CreateMemTableRep(const std::string& level0_dir,
+                                 const MemTableRep::KeyComparator& cmp,
+                                 Allocator*, const SliceTransform*,
+                                 Logger* logger, uint32_t) final {
     auto uc = cmp.icomparator()->user_comparator();
-    if (IsForwardBytewiseComparator(uc))
-      return new CSPPMemTab(m_mem_cap, false, logger, this);
-    else if (IsBytewiseComparator(uc))
-      return new CSPPMemTab(m_mem_cap, true, logger, this);
-    else
+    if (!uc->IsBytewise()) {
       return nullptr;
+    }
+    auto curr_convert_to_sst = convert_to_sst; // may be updated by webview
+    auto curr_num = as_atomic(cumu_num).fetch_add(1, std::memory_order_relaxed);
+    terark::string_appender<> conf;
+    conf.reserve(512);
+    conf|"?chunk_size="|chunk_size;
+    if (ConvertKind::kWriteMmap == curr_convert_to_sst) {
+      // File mmap does not support hugepage
+      conf|"&file_path="|level0_dir;
+      conf^"/cspp-%06zd.memtab"^curr_num;
+    } else {
+      conf|"&hugepage="|int(use_hugepage);
+    }
+    return new CSPPMemTab(m_mem_cap, uc->IsReverseBytewise(), logger,
+                          this, curr_num, curr_convert_to_sst, conf);
   }
   const char *Name() const final { return "CSPPMemTabFactory"; }
   bool IsInsertConcurrentlySupported() const final { return true; }
@@ -572,21 +652,20 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
       } else {
         THROW_InvalidArgument("use_hugepage must be bool or HugePageEnum");
       }
-      m_conf_str = "?hugepage=" + std::to_string(int(use_hugepage));
     }
     ROCKSDB_JSON_OPT_PROP(js, read_by_writer_token);
     ROCKSDB_JSON_OPT_PROP(js, token_use_idle);
     ROCKSDB_JSON_OPT_PROP(js, accurate_memsize);
+    ROCKSDB_JSON_OPT_ENUM(js, convert_to_sst);
     iter = js.find("chunk_size");
     if (js.end() != iter) {
       ROCKSDB_JSON_OPT_SIZE(js, chunk_size);
       ROCKSDB_VERIFY_F((chunk_size & (chunk_size-1)) == 0, "%zd(%#zX)",
                         chunk_size, chunk_size);
-      static_cast<string_appender<>&>(m_conf_str)|"&chunk_size="|chunk_size;
     }
     else {
      #if defined(ROCKSDB_UNIT_TEST)
-      m_conf_str += "&chunk_size=1024";
+      chunk_size = 1024;
      #endif
     }
     m_mem_cap = mem_cap;
@@ -661,6 +740,13 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   }
 };
 MemTableRep::Iterator* CSPPMemTab::GetIterator(Arena* a) {
+#if 0
+  if (m_is_sst) {
+    m_is_sst = true;
+  } else {
+    m_is_sst = false;
+  }
+#endif
   as_atomic(m_fac->cumu_iter_num).fetch_add(1, std::memory_order_relaxed);
   as_atomic(m_fac->live_iter_num).fetch_add(1, std::memory_order_relaxed);
   as_atomic(m_cumu_iter_num).fetch_add(1, std::memory_order_relaxed);
@@ -680,18 +766,35 @@ CSPPMemTab::Iter::~Iter() noexcept {
   as_atomic(factory->live_iter_num).fetch_sub(1, std::memory_order_relaxed);
   as_atomic(m_tab->m_live_iter_num).fetch_sub(1, std::memory_order_relaxed);
 }
-CSPPMemTab::CSPPMemTab(intptr_t cap, bool rev, Logger* log, CSPPMemTabFactory* f)
+CSPPMemTab::CSPPMemTab(intptr_t cap, bool rev, Logger* log, CSPPMemTabFactory* f,
+      size_t instance_idx, ConvertKind convert_to_sst, fstring fpath_or_conf)
     : MemTableRep(nullptr)
     , m_trie(4, f->use_vm ? -cap : cap, Patricia::MultiWriteMultiRead,
-             f->m_conf_str) {
+             fpath_or_conf) {
+  init(rev, log, f);
+  m_is_sst = false;
+  m_instance_idx = instance_idx;
+  m_convert_to_sst = convert_to_sst;
+}
+/// For SST
+CSPPMemTab::CSPPMemTab(bool rev, Logger* log, CSPPMemTabFactory* f,
+                       size_t instance_idx)
+    : MemTableRep(nullptr) {
+  init(rev, log, f);
+  m_is_empty = false;
+  m_is_sst = true;
+  m_instance_idx = instance_idx;
+  m_convert_to_sst = ConvertKind::kDontConvert;
+}
+inline void CSPPMemTab::init(bool rev, Logger* log, CSPPMemTabFactory* f) {
   m_fac = f;
   m_log = log;
   m_rev = rev;
+  m_has_converted_to_sst = false;
   m_read_by_writer_token = f->read_by_writer_token;
   m_token_use_idle = f->token_use_idle;
   m_accurate_memsize = f->accurate_memsize;
   as_atomic(f->live_num).fetch_add(1, std::memory_order_relaxed);
-  m_instance_idx = as_atomic(f->cumu_num).fetch_add(1, std::memory_order_relaxed);
   f->m_mtx.lock();
   f->m_memtab_num++;
   m_next = &f->m_head; // insert 'this' at linked list tail
@@ -701,13 +804,29 @@ CSPPMemTab::CSPPMemTab(intptr_t cap, bool rev, Logger* log, CSPPMemTabFactory* f
   f->m_mtx.unlock();
 }
 CSPPMemTab::~CSPPMemTab() noexcept {
-  TERARK_ASSERT_EZ(m_live_iter_num);
+#if 1
+  TERARK_VERIFY_EZ(m_live_iter_num);
+#else // debug code
+  if (m_live_iter_num) {
+    fprintf(stderr,
+      "ERROR: ~CSPPMemTab: is_sst = %d, instance_idx = %zd, live_iter_num = %d\n",
+      m_is_sst, m_instance_idx, m_live_iter_num);
+  }
+#endif
   as_atomic(m_fac->live_num).fetch_sub(1, std::memory_order_relaxed);
   m_fac->m_mtx.lock();
   m_fac->m_memtab_num--;
   m_next->m_prev = m_prev; // remove 'this' from linked list
   m_prev->m_next = m_next;
   m_fac->m_mtx.unlock();
+
+  if (ConvertKind::kWriteMmap == m_convert_to_sst) {
+    ROCKSDB_VERIFY(!m_is_sst);
+    ROCKSDB_VERIFY(!m_trie.mmap_fpath().empty());
+    if (!m_has_converted_to_sst) {
+      std::remove(m_trie.mmap_fpath().c_str());
+    }
+  }
 }
 void CSPPMemTab::MarkReadOnly() {
   auto used = m_trie.mem_size_inline();
@@ -726,9 +845,68 @@ void CSPPMemTab::MarkFlushed() {
   #pragma message "MADV_COLD is not defined because linux kernel is too old! CSPPMemTab still works OK!"
   #pragma message "MADV_COLD is for mitigating memory waste by user code pinning DB snapshots for long time"
  #endif
-  m_is_flushed = true;
 #endif
+  m_is_flushed = true;
 }
+bool CSPPMemTab::GetRandomInternalKeysAppend
+(size_t num, std::vector<std::string>* output)
+const {
+  SortableStrVec keys;
+  m_trie.dfa_get_random_keys(&keys, num);
+  MainPatricia::SingleReaderToken token(&m_trie);
+  for (size_t i = 0; i < keys.size(); ++i) {
+    fstring onekey = keys[i];
+    output->push_back(FirstInternalKey(SliceOf(onekey), token));
+  }
+  return true;
+}
+std::string CSPPMemTab::FirstInternalKey
+(Slice user_key, MainPatricia::TokenBase& token)
+const {
+  uint32_t vec_pin_pos = m_trie.value_of<uint32_t>(token);
+  auto vec_pin = (CSPPMemTab::VecPin*)m_trie.mem_get(vec_pin_pos);
+  auto entry = (CSPPMemTab::Entry*)m_trie.mem_get(vec_pin->pos);
+  std::string ikey;
+  ikey.reserve(user_key.size() + 8);
+  ikey.append(user_key.data(), user_key.size());
+  PutFixed64(&ikey, entry[0].tag);
+  return ikey;
+}
+#if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 70060
+Status CSPPMemTab::ApproximateKeyAnchors
+(const ReadOptions& ro, std::vector<Anchor>& anchors) const
+{
+  size_t num = 256;
+  SortableStrVec keys;
+  m_trie.dfa_get_random_keys(&keys, num);
+  if (keys.size() == 0) {
+    return Status::OK();
+  }
+  num = keys.size();
+  keys.sort();
+  Patricia::IteratorPtr raw_iter(m_trie.new_iter());
+  if (m_rev) {
+    std::reverse(keys.m_index.begin(), keys.m_index.end());
+    raw_iter->seek_begin(); // rev largest
+  } else {
+    raw_iter->seek_end(); // largest
+  }
+  if (keys.back() != raw_iter->word()) {
+    keys.push_back(raw_iter->word());
+  }
+  num = keys.size();
+  size_t avg_size = m_trie.mem_size_inline() / num;
+  for (size_t i = 0; i < num; ++i) {
+    size_t curr_size = avg_size;
+    for (; i+1 < num && keys[i] == keys[i+1]; ++i) {
+      curr_size += avg_size;
+    }
+    fstring onekey = keys[i];
+    anchors.emplace_back(SliceOf(onekey), curr_size);
+  }
+  return Status::OK();
+}
+#endif
 ROCKSDB_REG_Plugin("cspp", CSPPMemTabFactory, MemTableRepFactory);
 ROCKSDB_REG_EasyProxyManip("cspp", CSPPMemTabFactory, MemTableRepFactory);
 MemTableRepFactory* NewCSPPMemTabForPlain(const std::string& jstr) {
@@ -736,4 +914,297 @@ MemTableRepFactory* NewCSPPMemTabForPlain(const std::string& jstr) {
   const SidePluginRepo repo;
   return new CSPPMemTabFactory(js, repo);
 }
+/////////////////////////////////////////////////////////////////////////////
+////  Use CSPPMemTab as TableReader
+/////////////////////////////////////////////////////////////////////////////
+static const uint64_t kCSPPMemTabMagic = 0x546d654d50505343ULL; // CSPPMemT
+class CSPPMemTabTableBuilder : public TopTableBuilderBase {
+public:
+  using TopTableBuilderBase::properties_;
+  CSPPMemTabTableBuilder(const TableBuilderOptions& tbo, WritableFileWriter* writer)
+      : TopTableBuilderBase(tbo, writer) {
+    offset_ = writer->GetFileSize();
+  }
+  void Add(const Slice& key, const Slice& value) final {
+    ROCKSDB_DIE("Should not be called");
+  }
+  uint64_t EstimatedFileSize() const final {
+    ROCKSDB_DIE("Should not be called");
+  }
+  Status Finish() final {
+    closed_ = true;
+    WriteMeta(kCSPPMemTabMagic, {}); // write properties and footer
+    return Status::OK();
+  }
+  void Abandon() final { closed_ = true; }
+  void DoWrite(const void* p, size_t n) {
+    WriteBlock(fstring((const char*)p, n), file_, &offset_); // ignore ret
+  }
+};
+static void SeekToEnd(WritableFileWriter& writer, Logger* log) {
+  auto fs_file = writer.writable_file();
+  auto fd = fs_file->FileDescriptor();
+#if defined(_MSC_VER)
+  TODO ......
+#else
+  auto endpos = ::lseek(int(fd), 0, SEEK_END);
+  if (endpos < 0) {
+    std::string strerr = strerror(errno);
+    std::string fname = writer.file_name().c_str();
+    ROCKS_LOG_ERROR(log, "lseek(%s, 0, SEEK_END) = %s",
+                    fname.c_str(), strerr.c_str());
+    throw Status::IOError(fname, strerr);
+  }
+#endif
+  fs_file->SetFileSize(endpos);
+  writer.SetFileSize(endpos);
+}
+Status CSPPMemTab::ConvertToSST(FileMetaData* meta,
+                                const TableBuilderOptions& tbo)
+try {
+  ROCKSDB_VERIFY_NE(m_convert_to_sst, ConvertKind::kDontConvert);
+  IODebugContext dbg_ctx;
+  FileOptions fopt;
+  std::string fname = TableFileName(tbo.ioptions.cf_paths,
+                                    meta->fd.GetNumber(),
+                                    meta->fd.GetPathId());
+  IOStatus ios;
+  std::unique_ptr<FSWritableFile> fs_file;
+  if (ConvertKind::kWriteMmap == m_convert_to_sst) {
+    ios = tbo.ioptions.fs->RenameFile(m_trie.mmap_fpath(), fname,
+                                      fopt.io_options, &dbg_ctx);
+    if (!ios.ok()) {
+      ROCKS_LOG_ERROR(m_log, "rename(%s, %s) = %s",
+          m_trie.mmap_fpath().c_str(), fname.c_str(), strerror(errno));
+      return ios; // IOStatus to Status
+    }
+    ios = tbo.ioptions.fs->ReopenWritableFile(fname, fopt, &fs_file, &dbg_ctx);
+    if (!ios.ok())
+      return ios;
+  }
+  else {
+    ios = tbo.ioptions.fs->NewWritableFile(fname, fopt, &fs_file, &dbg_ctx);
+    if (!ios.ok())
+      return ios;
+  }
+  WritableFileWriter writer(std::move(fs_file), fname, fopt);
+  if (ConvertKind::kWriteMmap == m_convert_to_sst) {
+    SeekToEnd(writer, m_log);
+  }
+  CSPPMemTabTableBuilder builder(tbo, &writer);
+  if (ConvertKind::kWriteMmap != m_convert_to_sst) {
+    m_trie.save_mmap([&](const void* p, size_t n){ builder.DoWrite(p, n); });
+  }
+  builder.properties_.num_data_blocks = 1;
+  builder.properties_.num_entries = meta->num_entries;
+  builder.properties_.num_deletions = meta->num_deletions;
+  builder.properties_.num_range_deletions = meta->num_range_deletions;
+  builder.properties_.num_merge_operands = meta->num_merges;
+  builder.properties_.raw_key_size = meta->raw_key_size;
+  builder.properties_.raw_value_size = meta->raw_value_size;
+  auto per_idx_len = sizeof(uint32_t) + sizeof(VecPin) + sizeof(Entry);
+  builder.properties_.index_size = meta->raw_key_size;
+  builder.properties_.data_size = meta->raw_value_size +
+                                  per_idx_len * m_trie.num_words();
+  Status s = builder.Finish();
+  // Don't sync
+  // ios = writer->Fsync();
+  std::unique_ptr<MemTableRep::Iterator> iter(GetIterator(nullptr));
+  iter->SeekToFirst();  meta->smallest.DecodeFrom(iter->key());
+  iter->SeekToLast();   meta->largest.DecodeFrom(iter->key());
+  meta->fd.file_size = writer.GetFileSize();
+  meta->tail_size = builder.GetTailSize();
+  if (!tbo.db_id.empty() && !tbo.db_session_id.empty()) {
+    if (!GetSstInternalUniqueId(tbo.db_id, tbo.db_session_id,
+                                meta->fd.GetNumber(), &meta->unique_id).ok()) {
+      // if failed to get unique id, just set it Null
+      meta->unique_id = kNullUniqueId64x2;
+    }
+  }
+  m_has_converted_to_sst = true;
+  return s;
+}
+catch (const std::exception& ex) {
+  return Status::Corruption(ex.what());
+}
+catch (const Status& s) {
+  return s;
+}
+
+class CSPPMemTabTableFactory : public TableFactory {
+public:
+  CSPPMemTabTableFactory(const json& js, const SidePluginRepo& repo) {
+    m_repo = &repo;
+    ROCKSDB_JSON_OPT_PROP(js, sst_reader);
+  }
+  const char* Name() const override { return "CSPPMemTabTable"; }
+  using TableFactory::NewTableReader;
+  Status NewTableReader(const ReadOptions&,
+                        const TableReaderOptions&,
+                        std::unique_ptr<RandomAccessFileReader>&&,
+                        uint64_t file_size,
+                        std::unique_ptr<TableReader>*,
+                        bool prefetch_index_and_filter) const override;
+  TableBuilder* NewTableBuilder(const TableBuilderOptions&,
+                                WritableFileWriter*) const override {
+    ROCKSDB_DIE("Should not be called");
+  }
+  std::string GetPrintableOptions() const final {
+    return ToString({}, *m_repo);
+  }
+  Status ValidateOptions(const DBOptions&, const ColumnFamilyOptions&)
+  const final {
+    return Status::OK();
+  }
+  bool IsDeleteRangeSupported() const override { return true; }
+  void Update(const json&, const json& js, const SidePluginRepo&) {}
+  std::string ToString(const json& d, const SidePluginRepo& repo) const {
+    bool html = JsonSmartBool(d, "html");
+    json djs;
+    ROCKSDB_VERIFY_EQ(&repo, m_repo);
+    Sanitize_memtable_factory();
+    ROCKSDB_JSON_SET_FACT(djs, memtable_factory);
+    return JsonToString(djs, d);
+  }
+  void Sanitize_memtable_factory() const {
+    if (!memtable_factory) {
+      std::lock_guard<std::mutex> lk(mtx);
+      if (!memtable_factory) {
+        ROCKSDB_VERIFY(m_repo->Get(sst_reader, &memtable_factory));
+        ROCKSDB_VERIFY_F(dynamic_cast<CSPPMemTabFactory*>(memtable_factory.get()) != nullptr,
+          "Name() = %s", memtable_factory->Name());
+      }
+    }
+  }
+  const SidePluginRepo* m_repo;
+  std::string sst_reader;
+  mutable std::mutex mtx;
+  mutable std::shared_ptr<MemTableRepFactory> memtable_factory;
+
+  // stats
+  mutable long long start_time_point_;
+  mutable long long build_time_duration_; // exclude idle time
+  mutable size_t num_writers_;
+  mutable size_t num_readers_;
+  mutable size_t sum_full_key_len_;
+  mutable size_t sum_user_key_len_;
+  mutable size_t sum_user_key_cnt_;
+  mutable size_t sum_value_len_;
+  mutable size_t sum_entry_cnt_; // of all writers(builders)
+  mutable size_t sum_index_len_;
+  mutable size_t sum_index_num_;
+  mutable size_t sum_multi_num_;
+};
+class CSPPMemTabTableReader : public TopTableReaderBase {
+public:
+  ~CSPPMemTabTableReader() override;
+  CSPPMemTabTableReader(RandomAccessFileReader*, Slice file_data,
+                        const TableReaderOptions&,
+                        const CSPPMemTabTableFactory*);
+  InternalIterator*
+  NewIterator(const ReadOptions&, const SliceTransform* prefix_extractor,
+              Arena* arena, bool skip_filters, TableReaderCaller caller,
+              size_t compaction_readahead_size,
+              bool allow_unprepared_value) final {
+    return m_memtab->GetIterator(arena);
+  }
+  uint64_t ApproximateOffsetOf(ROCKSDB_8_X_COMMA(const ReadOptions&)
+                               const Slice& key, TableReaderCaller) final {
+    return 0;
+  }
+  uint64_t ApproximateSize(ROCKSDB_8_X_COMMA(const ReadOptions&)
+                           const Slice&, const Slice&, TableReaderCaller) final {
+    return 0;
+  }
+  size_t ApproximateMemoryUsage() const final { return file_data_.size(); }
+  Status Get(const ReadOptions& ro, const Slice& ikey, GetContext* get_context,
+             const SliceTransform*, bool/*skip_filters*/) final {
+    return m_memtab->SST_Get(ro, ikey, get_context);
+  }
+  Status VerifyChecksum(const ReadOptions&, TableReaderCaller) final {
+    return Status::OK();
+  }
+  bool GetRandomInternalKeysAppend(size_t num, std::vector<std::string>* output)
+  const final {
+    return m_memtab->GetRandomInternalKeysAppend(num, output);
+  }
+#if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 70060
+  Status ApproximateKeyAnchors(const ReadOptions& ro,
+                               std::vector<Anchor>& anchors) final {
+    return m_memtab->ApproximateKeyAnchors(ro, anchors);
+  }
+#endif
+  std::string ToWebViewString(const json& dump_options) const final;
+
+// data member also public
+  std::unique_ptr<CSPPMemTab> m_memtab;
+  const CSPPMemTabTableFactory* m_factory = nullptr;
+};
+CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
+    Slice file_data, const TableReaderOptions& tro,
+    const CSPPMemTabTableFactory* f) {
+  LoadCommonPart(file, tro, file_data, kCSPPMemTabMagic);
+  if (!fstring(table_properties_->compression_options).strstr("allseq0")) {
+    // special case: if entry.valueMul, global_seqno_ must be 0
+    global_seqno_ = 0;
+  }
+  table_properties_->compression_name = "CSPPMemTab";
+  auto memtab_fac = dynamic_cast<CSPPMemTabFactory*>(f->memtable_factory.get());
+  auto curr_num = as_atomic(memtab_fac->cumu_num)
+                 .fetch_add(1, std::memory_order_relaxed);
+  m_memtab.reset(new CSPPMemTab(isReverseBytewiseOrder_, tro.ioptions.logger,
+                                memtab_fac, curr_num));
+  m_memtab->m_trie.self_mmap_user_mem(file_data);
+  m_factory = f;
+  //fprintf(stderr, "CSPPMemTabTableReader: %s: %s\n",
+  //  file->file_name().c_str(), m_memtab->m_trie.str_stat().c_str());
+  as_atomic(m_factory->num_readers_).fetch_add(1, std::memory_order_relaxed);
+}
+CSPPMemTabTableReader::~CSPPMemTabTableReader() {
+  TERARK_VERIFY_EZ(m_memtab->m_live_iter_num);
+  m_memtab.reset(nullptr); // explicit delete
+  as_atomic(m_factory->num_readers_).fetch_sub(1, std::memory_order_relaxed);
+}
+std::string
+CSPPMemTabTableReader::ToWebViewString(const json& dump_options) const {
+  std::string str;
+  str = "TODO";
+  return str;
+}
+Status CSPPMemTabTableFactory::NewTableReader(
+              const ReadOptions& ro,
+              const TableReaderOptions& tro,
+              std::unique_ptr<RandomAccessFileReader>&& file,
+              uint64_t file_size,
+              std::unique_ptr<TableReader>* table,
+              bool prefetch_index_and_filter)
+const try {
+  (void)prefetch_index_and_filter; // now ignore
+  Sanitize_memtable_factory();
+  file->exchange(new MmapReadWrapper(file));
+  Slice file_data;
+  Status s = TopMmapReadAll(*file, file_size, &file_data);
+  if (!s.ok()) {
+    return s;
+  }
+  MmapAdvSeq(file_data);
+  MmapWarmUp(file_data);
+  table->reset(new CSPPMemTabTableReader(file.release(), file_data, tro, this));
+  return Status::OK();
+}
+catch (const IOStatus& s) {
+  WARN(tro.ioptions.info_log, "%s: Status: %s", ROCKSDB_FUNC, s.ToString().c_str());
+  return Status::IOError(ROCKSDB_FUNC, s.ToString());
+}
+catch (const Status& s) {
+  WARN(tro.ioptions.info_log, "%s: Status: %s", ROCKSDB_FUNC, s.ToString().c_str());
+  return s;
+}
+catch (const std::exception& ex) {
+  WARN(tro.ioptions.info_log, "%s: std::exception: %s", ROCKSDB_FUNC, ex.what());
+  return Status::Corruption(ROCKSDB_FUNC, ex.what());
+}
+ROCKSDB_REG_Plugin("CSPPMemTabTable", CSPPMemTabTableFactory, TableFactory);
+ROCKSDB_REG_EasyProxyManip("CSPPMemTabTable", CSPPMemTabTableFactory, TableFactory);
+ROCKSDB_RegTableFactoryMagicNumber(kCSPPMemTabMagic, "CSPPMemTabTable");
 } // namespace ROCKSDB_NAMESPACE
