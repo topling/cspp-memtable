@@ -693,6 +693,8 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_ENUM(djs, use_hugepage);
     ROCKSDB_JSON_SET_PROP(djs, read_by_writer_token);
     ROCKSDB_JSON_SET_PROP(djs, token_use_idle);
+    ROCKSDB_JSON_SET_PROP(djs, accurate_memsize);
+    ROCKSDB_JSON_SET_ENUM(djs, convert_to_sst);
     ROCKSDB_JSON_SET_PROP(djs, cumu_num);
     ROCKSDB_JSON_SET_PROP(djs, live_num);
     ROCKSDB_JSON_SET_PROP(djs, cumu_iter_num);
