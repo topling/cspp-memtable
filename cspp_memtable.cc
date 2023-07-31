@@ -473,8 +473,8 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     return true;
   }
   void Seek(const Slice& ikey, const char*) final {
-    if (m_tab->m_is_empty) return;
     if (UNLIKELY(!m_iter)) {
+      if (m_tab->m_is_empty) return;
       m_iter = m_tab->m_trie.new_iter();
     }
     fstring user_key = ExtractUserKey(ikey);
@@ -502,8 +502,8 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     AppendTag(entry.vec[m_idx = entry.num - 1].tag);
   }
   void SeekForPrev(const Slice& ikey, const char*) final {
-    if (m_tab->m_is_empty) return;
     if (UNLIKELY(!m_iter)) {
+      if (m_tab->m_is_empty) return;
       m_iter = m_tab->m_trie.new_iter();
     }
     fstring user_key = ExtractUserKey(ikey);
@@ -531,8 +531,8 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     AppendTag(entry.vec[m_idx = 0].tag);
   }
   void SeekToFirst() final {
-    if (m_tab->m_is_empty) return;
     if (UNLIKELY(!m_iter)) {
+      if (m_tab->m_is_empty) return;
       m_iter = m_tab->m_trie.new_iter();
     }
     if (UNLIKELY(!(m_rev ? m_iter->seek_end() : m_iter->seek_begin()))) {
@@ -543,8 +543,8 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     AppendTag(entry.vec[m_idx = entry.num - 1].tag);
   }
   void SeekToLast() final {
-    if (m_tab->m_is_empty) return;
     if (UNLIKELY(!m_iter)) {
+      if (m_tab->m_is_empty) return;
       m_iter = m_tab->m_trie.new_iter();
     }
     if (UNLIKELY(!(m_rev ? m_iter->seek_begin() : m_iter->seek_end()))) {
