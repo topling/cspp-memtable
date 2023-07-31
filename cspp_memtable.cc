@@ -407,8 +407,6 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   explicit Iter(CSPPMemTab*);
   ~Iter() noexcept override;
   bool Valid() const final { return m_idx >= 0; }
-  using MemTableRep::Iterator::Seek;
-  using MemTableRep::Iterator::SeekForPrev;
   const char* varlen_key() const final { TERARK_DIE("Bad call"); }
   Slice key() const final {
     TERARK_ASSERT_GE(m_idx, 0);
@@ -473,6 +471,9 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     return true;
   }
   void Seek(const Slice& ikey, const char*) final {
+    return Seek(ikey);
+  }
+  void Seek(const Slice& ikey) final {
     if (UNLIKELY(!m_iter)) {
       if (m_tab->m_is_empty) return;
       m_iter = m_tab->m_trie.new_iter();
@@ -502,6 +503,9 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     AppendTag(entry.vec[m_idx = entry.num - 1].tag);
   }
   void SeekForPrev(const Slice& ikey, const char*) final {
+    return SeekForPrev(ikey);
+  }
+  void SeekForPrev(const Slice& ikey) final {
     if (UNLIKELY(!m_iter)) {
       if (m_tab->m_is_empty) return;
       m_iter = m_tab->m_trie.new_iter();
