@@ -589,6 +589,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   intptr_t m_mem_cap = 2LL << 30;
   bool   use_vm = true;
   HugePageEnum  use_hugepage = HugePageEnum::kNone;
+  bool   vm_explicit_commit = false;
   bool   read_by_writer_token = true;
   bool   token_use_idle = true;
   bool   accurate_memsize = false; // mainly for debug and unit test
@@ -633,6 +634,8 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
       conf^"/cspp-%06zd.memtab"^curr_num;
     } else {
       conf|"&hugepage="|int(use_hugepage);
+      if (vm_explicit_commit)
+        conf|"&vm_explicit_commit=true"; // default is false
     }
     return new CSPPMemTab(m_mem_cap, uc->IsReverseBytewise(), logger,
                           this, curr_num, curr_convert_to_sst, conf);
@@ -657,6 +660,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
         THROW_InvalidArgument("use_hugepage must be bool or HugePageEnum");
       }
     }
+    ROCKSDB_JSON_OPT_PROP(js, vm_explicit_commit);
     ROCKSDB_JSON_OPT_PROP(js, read_by_writer_token);
     ROCKSDB_JSON_OPT_PROP(js, token_use_idle);
     ROCKSDB_JSON_OPT_PROP(js, accurate_memsize);
@@ -691,6 +695,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_SIZE(djs, chunk_size);
     ROCKSDB_JSON_SET_PROP(djs, use_vm);
     ROCKSDB_JSON_SET_ENUM(djs, use_hugepage);
+    ROCKSDB_JSON_SET_PROP(djs, vm_explicit_commit);
     ROCKSDB_JSON_SET_PROP(djs, read_by_writer_token);
     ROCKSDB_JSON_SET_PROP(djs, token_use_idle);
     ROCKSDB_JSON_SET_PROP(djs, accurate_memsize);
