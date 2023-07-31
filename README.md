@@ -9,7 +9,10 @@ cspp-memtable 在 [SidePlugin](https://github.com/topling/rockside/wiki) 中配�
 mem_cap       |uint64|2G    |cspp 需要预分配足够的单块内存**地址空间**，这些内存可以只是**保留地址空间，但并未实际分配**。<br/>有效最大值是 16G
 use_vm        |bool  |true  |使用 malloc/posix_memalign 时，地址空间可能是已经实际分配的，设置该选项会强制使用 mmap 分配内存，从而保证仅仅是**保留地址空间，但并不实际分配**
 use_hugepage  |bool  |false |使用该选项时，linux 下必须保证设置了足够的 `vm.nr_hugepages`
+vm_explicit_commit|bool  |false |Windows `VirtualAlloc` 需要显式 commit，linux 不需要，但是如果内存不足，访问虚存时会 SegFault/BusError，linux kernel 5.14+ 的 `MADV_POPULATE_WRITE` 可以起到 Windows 显式 commit 的类似效果
+convert_to_sst|enum  |kDontConvert|直接将 MemTable **转化**为 SST，省去 Flush，可选值：<br>`{kDontConvert, kDumpMem, kWriteMmap}`
 token_use_idle|bool  |true  |该选项用来优化 token ring，一般情况下使用默认值即可
+accurate_memsize|bool  |false  |仅用于测试，生产环境开启此选项会导致性能问题
 ### **[配置样例：使用 yaml](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.yaml#L69-L74)**
 ```yaml
 MemTableRepFactory:
@@ -46,6 +49,90 @@ MemTableRepFactory:
 }
 ```
 在 json 中定义好 cspp 对象之后，这样[引用该 cspp memtable](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.json#L102)
+
+## MemTable 直接转化成 SST
+MemTable 直接转化成 SST 是 ToplingDB 的特有功能，目前只有 CSPP MemTable 支持该功能。
+
+CSPP 可以直接在 ReadWrite 的 mmap 上操作，是 Crash Safe 的，该功能仍然尚未用到 Crash Safe 功能。
+
+`convert_to_sst` 的三个枚举值：
+
+* **kDontConvert**：禁用该功能，此为默认值。
+* **kDumpMem**：转化时将 MemTable 的整块内存写入 SST 文件，避免 CPU 消耗，但未降低内存消耗
+* **kWriteMmap**：将 MemTable 内容 mmap 到文件，这是关键功能，同时降低 CPU 和内存消耗
+
+CSPPMemTab 创建时预分配的内存可以是文件 mmap，此时文件在创建时 truncate 到 mem_cap 尺寸，
+主流的文件系统(ext4,xfs,...)都支持稀疏文件，虽然 truncate 到 mem_cap 尺寸，虚拟内存也分配
+了 mem_cap 地址空间，但实际上文件并没占磁盘空间，虚拟地址空间也并未占用物理内存。
+
+只有在我们实际向虚拟内存地址写入内容时，操作系统才会分配对应的物理内存（以 Page 为单位），
+只有当这些内存 Page 变脏（写入了内容）超过一定时间，操作系统才会把这些 Page 写入文件，
+此时才会实际分配磁盘空间。
+> 用 `ls -l -s --block-size=1K` 同时查看文件实际占用的空间和文件的名义尺寸。
+
+当 CSPP MemTable 从 Active 转化为 Immutable（被标记为 ReadOnly）时，文件被 truncate 到真实尺寸，
+转化 SST 时，只需要在文件后面追加 SST File Footer 即可。为此实现一个包装器，将 CSPP MemTable 包装
+成 SST，定义 SST TableFactory:
+```json
+    "cspp_memtab_sst": {
+      "class": "CSPPMemTabTable",
+      "params": {
+        "sst_reader": "cspp_sst_reader"
+      }
+    }
+```
+`cspp_memtab_sst` 引用了 MemTableRepFactory 对象 `cspp_sst_reader`:
+```json
+    "cspp_sst_reader" : {
+      "class": "cspp",
+      "params": {
+        "comment-1": "just for webview to discriminated from cspp",
+        "comment-2": "does not need any special configs",
+        "comment-3": "this object is used by cspp_memtab_sst"
+      }
+    }
+```
+然后，在 DispatchTable 中，将 `cspp_memtab_sst` 放入 `readers` 作为 SST TableFactory 子类 CSPPMemTabTable 的 reader:
+> 关键行： `"CSPPMemTabTable": "cspp_memtab_sst",`
+```json
+    "dispatch": {
+      "class": "DispatcherTable",
+      "params": {
+        "default": "light_dzip",
+        "readers": {
+          "VecAutoSortTable": "auto_sort",
+          "CSPPMemTabTable": "cspp_memtab_sst",
+          "BlockBasedTable": "bb",
+          "SingleFastTable": "sng",
+          "ToplingZipTable": "dzip"
+        },
+        "level_writers": ["sng", "sng", "dzip", "dzip", "dzip", "dzip", "dzip"]
+      }
+    }
+```
+DispatcherTable 从来不会创建 CSPPMemTabTable 的 SST，它只读取这种 SST。
+
+### 直接转化 SST 的收益
+**1. 降低 CPU 用量**：MemTable Flush 过程中要扫描 MemTable 和创建 SST，去掉这些操作，自然也就去掉了相应的 CPU 消耗。
+
+在分布式 Compact 的加持下，DB 结点只需要做 MemTable Flush 和 L0 -> L1 Compact，MemTable Flush 大约占一半，一下省去一半，
+效果是立竿见影的。
+
+**2. 降低内存用量**：MemTable Flush 中必然需要双份内存占用，如果存在 SuperVersion 对 MemTable 的引用，这个双份内存占用要持续很长时间，如果使用的是 BlockBasedTable，还有 BlockCache 中的一份内存占用。
+
+CSPP MemTable 直接转化成 SST，即便 SST 和 MemTable 同时被引用，但两者对应的 PageCache 物理内存只有一份，
+不会因为老旧 SuperVersion 的存在而多占内存！
+
+**3. 减少 IO**：如果写得很快，并且脏页留存时间较长，并且我们在转化完 SST 之后不 fsync，并且很快发生了 Compact
+导致 MemTable 转化来的 SST 被删除，那么在操作系统内部，因为这些 SST 文件的 mmap 还没来得及写回到磁盘上，该 SST
+文件就被删除了，所以操作系统实际上就不再需要把这些内存写回磁盘，从而大幅降低 IO。
+
+### 未来可能更近一步
+目前直接将 CSPP MemTable 转化为 SST，并不会大幅减少文件 IO，只是将这些 IO 分散到了写 MemTable 的过程中，
+因为写 MemTable 不完全是顺序写，有可能 IO 实际上会更大，这取决于操作系统负载和参数设定等（例如脏页留存时间）。
+
+更好的方案是 MemTable 只存储索引，数据放在 WAL Log 中，参考 [Omit L0 Flush](https://github.com/topling/toplingdb/wiki/Omit-L0-Flush)，但是做到这一点工程量太大，需要修改的代码太多……
+
 ## **memtablerep_bench**
 ToplingDB 在 RocksDB 的 memtablerep_bench 中加入了 cspp，以下脚本对比 skiplist 和 cspp（linux 下必须保证设置了足够的 `vm.nr_hugepages`）
 > linux kernel 5.14 以上可以自动检测 vm.nr_hugepages 不足导致的失败，旧版内核在 vm.nr_hugepages 不足时会发生 segfault 或 bus error，
