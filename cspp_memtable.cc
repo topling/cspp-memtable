@@ -733,7 +733,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_SIZE(djs, live_used_mem);
     ROCKSDB_JSON_SET_PROP(djs, token_qlen);
     ROCKSDB_JSON_SET_PROP(djs, total_raw_iter);
-    djs["comment"] = "(idx, qlen, raw_iter_num), strong: flushed, normal: readonly, em: active";
+    djs["comment"] = "(idx, qlen, raw_iter_num), <strong>strong: flushed</strong>, normal: readonly, <em>em: active</em>";
     ROCKSDB_JSON_SET_PROP(djs, detail_qlen);
     JS_CSPPMemTab_AddVersion(djs, html);
     return JsonToString(djs, d);
