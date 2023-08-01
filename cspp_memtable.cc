@@ -593,6 +593,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   bool   read_by_writer_token = true;
   bool   token_use_idle = true;
   bool   accurate_memsize = false; // mainly for debug and unit test
+  bool   sync_sst_file = true;
   ConvertKind convert_to_sst = ConvertKind::kDontConvert;
   size_t chunk_size = 2 << 20; // 2MiB
   size_t cumu_num = 0, cumu_iter_num = 0;
@@ -665,6 +666,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_OPT_PROP(js, token_use_idle);
     ROCKSDB_JSON_OPT_PROP(js, accurate_memsize);
     ROCKSDB_JSON_OPT_ENUM(js, convert_to_sst);
+    ROCKSDB_JSON_OPT_PROP(js, sync_sst_file);
     iter = js.find("chunk_size");
     if (js.end() != iter) {
       ROCKSDB_JSON_OPT_SIZE(js, chunk_size);
@@ -700,6 +702,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_PROP(djs, token_use_idle);
     ROCKSDB_JSON_SET_PROP(djs, accurate_memsize);
     ROCKSDB_JSON_SET_ENUM(djs, convert_to_sst);
+    ROCKSDB_JSON_SET_PROP(djs, sync_sst_file);
     ROCKSDB_JSON_SET_PROP(djs, cumu_num);
     ROCKSDB_JSON_SET_PROP(djs, live_num);
     ROCKSDB_JSON_SET_PROP(djs, cumu_iter_num);
@@ -1031,6 +1034,9 @@ try {
       // if failed to get unique id, just set it Null
       meta->unique_id = kNullUniqueId64x2;
     }
+  }
+  if (m_fac->sync_sst_file) {
+    s = writer.writable_file()->Fsync(fopt.io_options, &dbg_ctx);
   }
   m_has_converted_to_sst = true;
   return s;
