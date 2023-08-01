@@ -976,35 +976,37 @@ static void SeekToEnd(WritableFileWriter& writer, Logger* log) {
 Status CSPPMemTab::ConvertToSST(FileMetaData* meta,
                                 const TableBuilderOptions& tbo)
 try {
-  Env* env = Env::Default();
-  double t0 = env->NowMicros();
+  auto& ioptions = tbo.ioptions;
+  auto* clock = ioptions.clock;
+  auto* fs = ioptions.fs.get();
+  double t0 = clock->NowMicros();
   ROCKSDB_VERIFY_NE(m_convert_to_sst, ConvertKind::kDontConvert);
   IODebugContext dbg_ctx;
   FileOptions fopt;
   std::string fname = TableFileName(tbo.ioptions.cf_paths,
                                     meta->fd.GetNumber(),
                                     meta->fd.GetPathId());
-  IOStatus ios;
   std::unique_ptr<FSWritableFile> fs_file;
   if (ConvertKind::kWriteMmap == m_convert_to_sst) {
-    ios = tbo.ioptions.fs->RenameFile(m_trie.mmap_fpath(), fname,
-                                      fopt.io_options, &dbg_ctx);
+    const std::string& src_fname = m_trie.mmap_fpath();
+    IOStatus ios = fs->RenameFile(src_fname, fname, fopt.io_options, &dbg_ctx);
     if (!ios.ok()) {
       ROCKS_LOG_ERROR(m_log, "rename(%s, %s) = %s",
-          m_trie.mmap_fpath().c_str(), fname.c_str(), strerror(errno));
+          src_fname.c_str(), fname.c_str(), ios.ToString().c_str());
       return ios; // IOStatus to Status
     }
-    ios = tbo.ioptions.fs->ReopenWritableFile(fname, fopt, &fs_file, &dbg_ctx);
+    ios = fs->ReopenWritableFile(fname, fopt, &fs_file, &dbg_ctx);
     if (!ios.ok())
       return ios;
   }
   else {
-    ios = tbo.ioptions.fs->NewWritableFile(fname, fopt, &fs_file, &dbg_ctx);
+    IOStatus ios = fs->NewWritableFile(fname, fopt, &fs_file, &dbg_ctx);
     if (!ios.ok())
       return ios;
   }
-  double t1 = env->NowMicros();
-  WritableFileWriter writer(std::move(fs_file), fname, fopt);
+  double t1 = clock->NowMicros();
+  WritableFileWriter writer(std::move(fs_file), fname, fopt, ioptions.clock,
+              nullptr, ioptions.statistics.get(), ioptions.listeners);
   if (ConvertKind::kWriteMmap == m_convert_to_sst) {
     SeekToEnd(writer, m_log);
   }
@@ -1012,7 +1014,7 @@ try {
   if (ConvertKind::kWriteMmap != m_convert_to_sst) {
     m_trie.save_mmap([&](const void* p, size_t n){ builder.DoWrite(p, n); });
   }
-  double t2 = env->NowMicros();
+  double t2 = clock->NowMicros();
   builder.properties_.num_data_blocks = 1;
   builder.properties_.num_entries = meta->num_entries;
   builder.properties_.num_deletions = meta->num_deletions;
@@ -1025,7 +1027,7 @@ try {
   builder.properties_.data_size = meta->raw_value_size +
                                   per_idx_len * m_trie.num_words();
   Status s = builder.Finish();
-  double t3 = env->NowMicros();
+  double t3 = clock->NowMicros();
   std::unique_ptr<MemTableRep::Iterator> iter(GetIterator(nullptr));
   iter->SeekToFirst();  meta->smallest.DecodeFrom(iter->key());
   iter->SeekToLast();   meta->largest.DecodeFrom(iter->key());
@@ -1038,15 +1040,15 @@ try {
       meta->unique_id = kNullUniqueId64x2;
     }
   }
-  double t4 = env->NowMicros();
+  double t4 = clock->NowMicros();
   s = writer.Flush(); // not sync
-  double t5 = env->NowMicros();
+  double t5 = clock->NowMicros();
   if (m_fac->sync_sst_file) {
     s = writer.writable_file()->Fsync(fopt.io_options, &dbg_ctx);
   }
-  double t6 = env->NowMicros();
+  double t6 = clock->NowMicros();
   writer.Close();
-  double t7 = env->NowMicros();
+  double t7 = clock->NowMicros();
   ROCKS_LOG_INFO(m_log, "CSPPMemTab::ConvertToSST: time(ms): "
     "open: %.3f, %s: %.3f, finish: %.3f, meta: %.3f, Flush: %.3f, sync: %.3f, close: %.3f, all: %.3f",
     (t1-t0)/1e3, ConvertKind::kWriteMmap == m_convert_to_sst ? "seek" : "write",
