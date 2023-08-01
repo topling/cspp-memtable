@@ -976,6 +976,8 @@ static void SeekToEnd(WritableFileWriter& writer, Logger* log) {
 Status CSPPMemTab::ConvertToSST(FileMetaData* meta,
                                 const TableBuilderOptions& tbo)
 try {
+  Env* env = Env::Default();
+  double t0 = env->NowMicros();
   ROCKSDB_VERIFY_NE(m_convert_to_sst, ConvertKind::kDontConvert);
   IODebugContext dbg_ctx;
   FileOptions fopt;
@@ -1001,6 +1003,7 @@ try {
     if (!ios.ok())
       return ios;
   }
+  double t1 = env->NowMicros();
   WritableFileWriter writer(std::move(fs_file), fname, fopt);
   if (ConvertKind::kWriteMmap == m_convert_to_sst) {
     SeekToEnd(writer, m_log);
@@ -1009,6 +1012,7 @@ try {
   if (ConvertKind::kWriteMmap != m_convert_to_sst) {
     m_trie.save_mmap([&](const void* p, size_t n){ builder.DoWrite(p, n); });
   }
+  double t2 = env->NowMicros();
   builder.properties_.num_data_blocks = 1;
   builder.properties_.num_entries = meta->num_entries;
   builder.properties_.num_deletions = meta->num_deletions;
@@ -1021,6 +1025,7 @@ try {
   builder.properties_.data_size = meta->raw_value_size +
                                   per_idx_len * m_trie.num_words();
   Status s = builder.Finish();
+  double t3 = env->NowMicros();
   // Don't sync
   // ios = writer->Fsync();
   std::unique_ptr<MemTableRep::Iterator> iter(GetIterator(nullptr));
@@ -1035,9 +1040,15 @@ try {
       meta->unique_id = kNullUniqueId64x2;
     }
   }
+  double t4 = env->NowMicros();
   if (m_fac->sync_sst_file) {
     s = writer.writable_file()->Fsync(fopt.io_options, &dbg_ctx);
   }
+  double t5 = env->NowMicros();
+  ROCKS_LOG_INFO(m_log, "CSPPMemTab::ConvertToSST: time(ms): "
+    "open: %.3f, %s: %.3f, finish: %.3f, meta: %.3f, sync: %.3f, all: %.3f",
+    (t1-t0)/1e3, ConvertKind::kWriteMmap == m_convert_to_sst ? "seek" : "write",
+    (t2-t1)/1e3, (t3-t2)/1e3, (t4-t3)/1e3, (t5-t4)/1e3, (t5-t0)/1e3);
   m_has_converted_to_sst = true;
   return s;
 }
