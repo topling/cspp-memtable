@@ -1041,14 +1041,19 @@ try {
     }
   }
   double t4 = env->NowMicros();
+  s = writer.Flush(); // not sync
+  double t5 = env->NowMicros();
   if (m_fac->sync_sst_file) {
     s = writer.writable_file()->Fsync(fopt.io_options, &dbg_ctx);
   }
-  double t5 = env->NowMicros();
+  double t6 = env->NowMicros();
+  writer.Close();
+  double t7 = env->NowMicros();
+
   ROCKS_LOG_INFO(m_log, "CSPPMemTab::ConvertToSST: time(ms): "
-    "open: %.3f, %s: %.3f, finish: %.3f, meta: %.3f, sync: %.3f, all: %.3f",
+    "open: %.3f, %s: %.3f, finish: %.3f, meta: %.3f, Flush: %.3f, sync: %.3f, close: %.3f, all: %.3f",
     (t1-t0)/1e3, ConvertKind::kWriteMmap == m_convert_to_sst ? "seek" : "write",
-    (t2-t1)/1e3, (t3-t2)/1e3, (t4-t3)/1e3, (t5-t4)/1e3, (t5-t0)/1e3);
+    (t2-t1)/1e3, (t3-t2)/1e3, (t4-t3)/1e3, (t5-t4)/1e3, (t6-t5)/1e3, (t7-t6)/1e3, (t7-t0)/1e3);
   m_has_converted_to_sst = true;
   return s;
 }
