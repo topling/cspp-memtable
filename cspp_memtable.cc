@@ -983,6 +983,7 @@ try {
   ROCKSDB_VERIFY_NE(m_convert_to_sst, ConvertKind::kDontConvert);
   IODebugContext dbg_ctx;
   FileOptions fopt;
+  fopt.allow_fallocate = false;
   std::string fname = TableFileName(tbo.ioptions.cf_paths,
                                     meta->fd.GetNumber(),
                                     meta->fd.GetPathId());
@@ -1004,6 +1005,7 @@ try {
     if (!ios.ok())
       return ios;
   }
+  fs_file->SetPreallocationBlockSize(0); // disable fallocate
   double t1 = clock->NowMicros();
   WritableFileWriter writer(std::move(fs_file), fname, fopt, ioptions.clock,
               nullptr, ioptions.statistics.get(), ioptions.listeners);
