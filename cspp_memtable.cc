@@ -951,8 +951,8 @@ public:
     return Status::OK();
   }
   void Abandon() final { closed_ = true; }
-  void DoWrite(const void* p, size_t n) {
-    WriteBlock(fstring((const char*)p, n), file_, &offset_); // ignore ret
+  void DoWrite(fstring data) {
+    WriteBlock(data, file_, &offset_); // ignore ret
   }
 };
 static void SeekToEnd(WritableFileWriter& writer, Logger* log) {
@@ -1015,7 +1015,7 @@ try {
   }
   CSPPMemTabTableBuilder builder(tbo, &writer);
   if (!is_file_mmap) {
-    m_trie.save_mmap([&](const void* p, size_t n){ builder.DoWrite(p, n); });
+    m_trie.save_mmap([&](fstring data){ builder.DoWrite(data); });
   }
   double t2 = clock->NowMicros();
   builder.properties_.num_data_blocks = 1;
