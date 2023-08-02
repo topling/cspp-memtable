@@ -10,8 +10,8 @@ mem_cap       |uint64|2G    |cspp 需要预分配足够的单块内存**地址�
 use_vm        |bool  |true  |使用 malloc/posix_memalign 时，地址空间可能是已经实际分配的，设置该选项会强制使用 mmap 分配内存，从而保证仅仅是**保留地址空间，但并不实际分配**
 use_hugepage  |bool  |false |使用该选项时，linux 下必须保证设置了足够的 `vm.nr_hugepages`
 vm_explicit_commit|bool  |false |Windows `VirtualAlloc` 需要显式 commit，linux 不需要，但是如果内存不足，访问虚存时会 SegFault/BusError，linux kernel 5.14+ 的 `MADV_POPULATE_WRITE` 可以起到 Windows 显式 commit 的类似效果
-convert_to_sst|enum  |kDontConvert|直接将 MemTable **转化**为 SST，省去 Flush，可选值：<br>`{kDontConvert, kDumpMem, kWriteMmap}`
-sync_sst_file |bool  |convert_to_sst 为 `kWriteMmap` 时，SST 转化完成后是否执行 fsync
+convert_to_sst|enum  |kDontConvert|直接将 MemTable **转化**为 SST，省去 Flush，可选值：<br>`{kDontConvert, kDumpMem, kFileMmap}`
+sync_sst_file |bool  |convert_to_sst 为 `kFileMmap` 时，SST 转化完成后是否执行 fsync
 token_use_idle|bool  |true  |该选项用来优化 token ring，一般情况下使用默认值即可
 accurate_memsize|bool  |false  |仅用于测试，生产环境开启此选项会导致性能问题
 ### **[配置样例：使用 yaml](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.yaml#L69-L74)**
@@ -60,7 +60,7 @@ CSPP 可以直接在 ReadWrite 的 mmap 上操作，是 Crash Safe 的，该功�
 
 * **kDontConvert**：禁用该功能，此为默认值。
 * **kDumpMem**：转化时将 MemTable 的整块内存写入 SST 文件，避免 CPU 消耗，但未降低内存消耗
-* **kWriteMmap**：将 MemTable 内容 mmap 到文件，这是关键功能，同时降低 CPU 和内存消耗
+* **kFileMmap**：将 MemTable 内容 mmap 到文件，这是关键功能，同时降低 CPU 和内存消耗
 
 CSPPMemTab 创建时预分配的内存可以是文件 mmap，此时文件在创建时 truncate 到 mem_cap 尺寸，
 主流的文件系统(ext4,xfs,...)都支持稀疏文件，虽然 truncate 到 mem_cap 尺寸，虚拟内存也分配

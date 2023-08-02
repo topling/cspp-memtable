@@ -19,7 +19,7 @@
 const char* git_version_hash_info_cspp_memtable();
 namespace ROCKSDB_NAMESPACE {
 using namespace terark;
-ROCKSDB_ENUM_CLASS(ConvertKind, uint08_t, kDontConvert, kDumpMem, kWriteMmap);
+ROCKSDB_ENUM_CLASS(ConvertKind, uint08_t, kDontConvert, kDumpMem, kFileMmap);
 static const uint32_t LOCK_FLAG = uint32_t(1) << 31;
 struct CSPPMemTabFactory;
 struct MemTabLinkListNode {
@@ -629,7 +629,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     terark::string_appender<> conf;
     conf.reserve(512);
     conf|"?chunk_size="|chunk_size;
-    if (ConvertKind::kWriteMmap == curr_convert_to_sst) {
+    if (ConvertKind::kFileMmap == curr_convert_to_sst) {
       // File mmap does not support hugepage
       conf|"&file_path="|level0_dir;
       conf^"/cspp-%06zd.memtab"^curr_num;
@@ -834,7 +834,7 @@ CSPPMemTab::~CSPPMemTab() noexcept {
   m_prev->m_next = m_next;
   m_fac->m_mtx.unlock();
 
-  if (ConvertKind::kWriteMmap == m_convert_to_sst) {
+  if (ConvertKind::kFileMmap == m_convert_to_sst) {
     ROCKSDB_VERIFY(!m_is_sst);
     ROCKSDB_VERIFY(!m_trie.mmap_fpath().empty());
     if (!m_has_converted_to_sst) {
@@ -988,7 +988,8 @@ try {
                                     meta->fd.GetNumber(),
                                     meta->fd.GetPathId());
   std::unique_ptr<FSWritableFile> fs_file;
-  if (ConvertKind::kWriteMmap == m_convert_to_sst) {
+  const bool is_file_mmap = ConvertKind::kFileMmap == m_convert_to_sst;
+  if (is_file_mmap) {
     const std::string& src_fname = m_trie.mmap_fpath();
     IOStatus ios = fs->RenameFile(src_fname, fname, fopt.io_options, &dbg_ctx);
     if (!ios.ok()) {
@@ -1009,11 +1010,11 @@ try {
   double t1 = clock->NowMicros();
   WritableFileWriter writer(std::move(fs_file), fname, fopt, ioptions.clock,
               nullptr, ioptions.statistics.get(), ioptions.listeners);
-  if (ConvertKind::kWriteMmap == m_convert_to_sst) {
+  if (is_file_mmap) {
     SeekToEnd(writer, m_log);
   }
   CSPPMemTabTableBuilder builder(tbo, &writer);
-  if (ConvertKind::kWriteMmap != m_convert_to_sst) {
+  if (!is_file_mmap) {
     m_trie.save_mmap([&](const void* p, size_t n){ builder.DoWrite(p, n); });
   }
   double t2 = clock->NowMicros();
@@ -1053,7 +1054,7 @@ try {
   double t7 = clock->NowMicros();
   ROCKS_LOG_INFO(m_log, "CSPPMemTab::ConvertToSST: time(ms): "
     "open: %.3f, %s: %.3f, finish: %.3f, meta: %.3f, Flush: %.3f, sync: %.3f, close: %.3f, all: %.3f",
-    (t1-t0)/1e3, ConvertKind::kWriteMmap == m_convert_to_sst ? "seek" : "write",
+    (t1-t0)/1e3, is_file_mmap ? "seek" : "write",
     (t2-t1)/1e3, (t3-t2)/1e3, (t4-t3)/1e3, (t5-t4)/1e3, (t6-t5)/1e3, (t7-t6)/1e3, (t7-t0)/1e3);
   m_has_converted_to_sst = true;
   return s;
