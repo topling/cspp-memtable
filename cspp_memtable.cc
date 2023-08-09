@@ -923,6 +923,8 @@ Status CSPPMemTab::ApproximateKeyAnchors
 #endif
 ROCKSDB_REG_Plugin("cspp", CSPPMemTabFactory, MemTableRepFactory);
 ROCKSDB_REG_EasyProxyManip("cspp", CSPPMemTabFactory, MemTableRepFactory);
+ROCKSDB_REG_Plugin("CSPPMemTab", CSPPMemTabFactory, MemTableRepFactory);
+ROCKSDB_REG_EasyProxyManip("CSPPMemTab", CSPPMemTabFactory, MemTableRepFactory);
 MemTableRepFactory* NewCSPPMemTabForPlain(const std::string& jstr) {
   json js = json::parse(jstr);
   const SidePluginRepo repo;
