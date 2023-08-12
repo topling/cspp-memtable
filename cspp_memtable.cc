@@ -1171,6 +1171,9 @@ public:
     return m_memtab->ApproximateKeyAnchors(ro, anchors);
   }
 #endif
+  bool IsMyFactory(const TableFactory* fac) const final {
+    return fac && dynamic_cast<const CSPPMemTabTableFactory*>(fac);
+  }
   std::string ToWebViewString(const json& dump_options) const final;
 
 // data member also public
