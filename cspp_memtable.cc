@@ -1028,9 +1028,11 @@ try {
   builder.properties_.raw_key_size = meta->raw_key_size;
   builder.properties_.raw_value_size = meta->raw_value_size;
   auto per_idx_len = sizeof(uint32_t) + sizeof(VecPin) + sizeof(Entry);
-  builder.properties_.index_size = meta->raw_key_size;
   builder.properties_.data_size = meta->raw_value_size +
                                   per_idx_len * m_trie.num_words();
+  builder.properties_.index_size = m_trie.mem_size_inline() -
+                                   m_trie.mem_frag_size() -
+                                   builder.properties_.data_size;
   Status s = builder.Finish();
   double t3 = clock->NowMicros();
   std::unique_ptr<MemTableRep::Iterator> iter(GetIterator(nullptr));
