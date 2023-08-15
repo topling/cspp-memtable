@@ -681,6 +681,9 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     m_mem_cap = mem_cap;
   }
   std::string ToString(const json& d, const SidePluginRepo&) const {
+    return JsonToString(ToJson(d), d);
+  }
+  json ToJson(const json& d) const {
     size_t mem_cap = m_mem_cap;
     auto avg_used_mem = cumu_num ? cumu_used_mem / cumu_num : 0;
     bool html = JsonSmartBool(d, "html");
@@ -750,7 +753,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     djs["comment"] = "(idx, qlen, raw_iter_num), <strong>strong: flushed</strong>, normal: readonly, <em>em: active</em>";
     ROCKSDB_JSON_SET_PROP(djs, detail_qlen);
     JS_CSPPMemTab_AddVersion(djs, html);
-    return JsonToString(djs, d);
+    return djs;
   }
 };
 MemTableRep::Iterator* CSPPMemTab::GetIterator(Arena* a) {
@@ -1073,8 +1076,7 @@ catch (const Status& s) {
 class CSPPMemTabTableFactory : public TableFactory {
 public:
   CSPPMemTabTableFactory(const json& js, const SidePluginRepo& repo) {
-    m_repo = &repo;
-    ROCKSDB_JSON_OPT_PROP(js, sst_reader);
+    memtable_factory = std::make_shared<CSPPMemTabFactory>(js, repo);
   }
   const char* Name() const override { return "CSPPMemTabTable"; }
   using TableFactory::NewTableReader;
@@ -1089,7 +1091,8 @@ public:
     ROCKSDB_DIE("Should not be called");
   }
   std::string GetPrintableOptions() const final {
-    return ToString({}, *m_repo);
+    json djs = memtable_factory->ToJson({});
+    return djs.dump();
   }
   Status ValidateOptions(const DBOptions&, const ColumnFamilyOptions&)
   const final {
@@ -1098,27 +1101,10 @@ public:
   bool IsDeleteRangeSupported() const override { return true; }
   void Update(const json&, const json& js, const SidePluginRepo&) {}
   std::string ToString(const json& d, const SidePluginRepo& repo) const {
-    bool html = JsonSmartBool(d, "html");
-    json djs;
-    ROCKSDB_VERIFY_EQ(&repo, m_repo);
-    Sanitize_memtable_factory();
-    ROCKSDB_JSON_SET_FACT(djs, memtable_factory);
+    json djs = memtable_factory->ToJson(d);
     return JsonToString(djs, d);
   }
-  void Sanitize_memtable_factory() const {
-    if (!memtable_factory) {
-      std::lock_guard<std::mutex> lk(mtx);
-      if (!memtable_factory) {
-        ROCKSDB_VERIFY(m_repo->Get(sst_reader, &memtable_factory));
-        ROCKSDB_VERIFY_F(dynamic_cast<CSPPMemTabFactory*>(memtable_factory.get()) != nullptr,
-          "Name() = %s", memtable_factory->Name());
-      }
-    }
-  }
-  const SidePluginRepo* m_repo;
-  std::string sst_reader;
-  mutable std::mutex mtx;
-  mutable std::shared_ptr<MemTableRepFactory> memtable_factory;
+  std::shared_ptr<CSPPMemTabFactory> memtable_factory;
 
   // stats
   mutable long long start_time_point_;
@@ -1191,7 +1177,7 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
     global_seqno_ = 0;
   }
   table_properties_->compression_name = "CSPPMemTab";
-  auto memtab_fac = dynamic_cast<CSPPMemTabFactory*>(f->memtable_factory.get());
+  auto memtab_fac = f->memtable_factory.get();
   auto curr_num = as_atomic(memtab_fac->cumu_num)
                  .fetch_add(1, std::memory_order_relaxed);
   m_memtab.reset(new CSPPMemTab(isReverseBytewiseOrder_, tro.ioptions.logger,
@@ -1222,7 +1208,6 @@ Status CSPPMemTabTableFactory::NewTableReader(
               bool prefetch_index_and_filter)
 const try {
   (void)prefetch_index_and_filter; // now ignore
-  Sanitize_memtable_factory();
   file->exchange(new MmapReadWrapper(file));
   Slice file_data;
   Status s = TopMmapReadAll(*file, file_size, &file_data);
