@@ -77,20 +77,7 @@ CSPPMemTab 创建时预分配的内存可以是文件 mmap，此时文件在创�
 ```json
     "cspp_memtab_sst": {
       "class": "CSPPMemTabTable",
-      "params": {
-        "sst_reader": "cspp_sst_reader"
-      }
-    }
-```
-`cspp_memtab_sst` 引用了 MemTableRepFactory 对象 `cspp_sst_reader`:
-```json
-    "cspp_sst_reader" : {
-      "class": "cspp",
-      "params": {
-        "comment-1": "just for webview to discriminated from cspp",
-        "comment-2": "does not need any special configs",
-        "comment-3": "this object is used by cspp_memtab_sst"
-      }
+      "params": { }
     }
 ```
 然后，在 DispatchTable 中，将 `cspp_memtab_sst` 放入 `readers` 作为 SST TableFactory 子类 CSPPMemTabTable 的 reader:
