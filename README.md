@@ -155,11 +155,11 @@ git clone https://github.com/topling/toplingdb
 cd toplingdb
 make DEBUG_LEVEL=0 memtablerep_bench -j`nproc`
 export LD_LIBRARY_PATH=.:`find sideplugin -name lib_shared`:${LD_LIBRARY_PATH}
-./memtablerep_bench -benchmarks=fillrandom,readrandom,readwrite \
-  -memtablerep=skiplist -huge_page_tlb_size=2097152 \
+./memtablerep_bench -memtablerep=skiplist -huge_page_tlb_size=2097152 \
+  -benchmarks=fillrandom,readrandom,readwrite \  
   -write_buffer_size=536870912 -item_size=0 -num_operations=10000000
-./memtablerep_bench -benchmarks=fillrandom,readrandom,readwrite \
-  -memtablerep='cspp:{"mem_cap":"16G","use_hugepage":true}' \
+./memtablerep_bench -memtablerep='cspp:{"mem_cap":"16G","use_hugepage":true}' \
+  -benchmarks=fillrandom,readrandom,readwrite \
   -write_buffer_size=536870912 -item_size=0 -num_operations=10000000
 ```
 该测试结果一般可体现出 CSPP 相比 SkipList，**写性能有 6 倍的优势，读性能 有 8 倍的优势**。
