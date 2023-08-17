@@ -5,7 +5,7 @@
 ## **配置方式**
 cspp-memtable 在 [SidePlugin](https://github.com/topling/rockside/wiki) 中配置，类名是 `cspp`，配置参数：
 参数名        | 类型  |默认值| 说明
---------------|------|------|------
+--------------|:----:|:----:|------
 mem_cap       |uint64|2G    |cspp 需要预分配足够的单块内存**地址空间**，这些内存可以只是**保留地址空间，但并未实际分配**。<br/>有效最大值是 16G
 use_vm        |bool  |true  |使用 malloc/posix_memalign 时，地址空间可能是已经实际分配的，设置该选项会强制使用 mmap 分配内存，从而保证仅仅是**保留地址空间，但并不实际分配**
 use_hugepage  |bool  |false |使用该选项时，linux 下必须保证设置了足够的 `vm.nr_hugepages`
