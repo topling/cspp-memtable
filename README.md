@@ -54,7 +54,8 @@ MemTableRepFactory:
 ## MemTable 直接转化成 SST
 MemTable 直接转化成 SST 是 ToplingDB 的特有功能，目前只有 CSPP MemTable 支持该功能。
 
-CSPP 可以直接在 ReadWrite 的 mmap 上操作，是 Crash Safe 的，该功能仍然尚未用到 Crash Safe 功能。
+CSPP 可以直接在 ReadWrite 的文件 mmap 上操作，这是该功能得以有效实现的基础。
+> CSPP 为了实现高性能的多线程并发插入，使用了 Copy On Write，由此顺带获得了 Crash Safe 的效果，也就是说进程在任意时刻崩溃时，文件 mmap 上的 CSPP Trie 的状态都是一致的，实现了数据库 ACID 中的 ACD 三项。不过该功能目前尚未用到 Crash Safe。
 
 `convert_to_sst` 的三个枚举值：
 
@@ -100,10 +101,14 @@ CSPPMemTab 创建时预分配的内存可以是文件 mmap，此时文件在创�
 ```
 DispatcherTable 从来不会创建 CSPPMemTabTable 的 SST，它只读取这种 SST。
 
+### 最佳实践
+1. ColumnFamilyOptions::write_buffer_size 配置为较大的值（例如 2G，同时将 CSPPMemTab::mem_cap 设为 3G）
+1. ColumnFamilyOptions::max_bytes_for_level_base 不要配置（默认 = max(256M, write_buffer_size)）
+
 ### 直接转化 SST 的收益
 **1. 降低 CPU 用量**：MemTable Flush 过程中要扫描 MemTable 和创建 SST，去掉这些操作，自然也就去掉了相应的 CPU 消耗。
 
-在分布式 Compact 的加持下，DB 结点只需要做 MemTable Flush 和 L0 -> L1 Compact，MemTable Flush 大约占一半，一下省去一半，
+在分布式 Compact 的加持下，DB 结点只需要做 MemTable Flush 和 L0 -> L1 Compact，MemTable Flush 大约占一半，省去一半，
 效果是立竿见影的。
 
 **2. 降低内存用量**：MemTable Flush 中必然需要双份内存占用，如果存在 SuperVersion 对 MemTable 的引用，这个双份内存占用要持续很长时间，如果使用的是 BlockBasedTable，还有 BlockCache 中的一份内存占用。
@@ -143,6 +148,9 @@ export LD_LIBRARY_PATH=.:`find sideplugin -name lib_shared`:${LD_LIBRARY_PATH}
 * 注意：测试结果中最有参考价值的指标是 **write us/op** 和 **read us/op**
 * 注意：memtablerep_bench 仅测试 MemTableRep 的性能，调用链的开销很低
   * 如果在 DB 中使用 CSPP，主要耗时在于调用链开销，即便如此，最终的加速比也非常显著
+* 注意：memtablerep_bench 不支持多线程并发写，要测试多线程并发写，请使用 db_bench
+  * 例如：db_bench -threads=10 -batch_size=100 -benchmarks=fillrandom \\
+                  -json=path/to/db_bench_enterprise.yaml ...
 
 ## **背景**
 > 以下文档主要完成于 2018 年，之后进行了小幅修改和添加注解。
