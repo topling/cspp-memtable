@@ -11,7 +11,7 @@ use_vm        |bool  |true  |使用 malloc/posix_memalign 时，地址空间可�
 use_hugepage  |bool  |false |使用该选项时，linux 下必须保证设置了足够的 `vm.nr_hugepages`
 vm_explicit_commit|bool  |false |Windows `VirtualAlloc` 需要显式 commit，linux 不需要，但是如果内存不足，访问虚存时会 SegFault/BusError，linux kernel 5.14+ 的 `MADV_POPULATE_WRITE` 可以起到 Windows 显式 commit 的类似效果
 convert_to_sst|enum  |kDontConvert|直接将 MemTable **转化**为 SST，省去 Flush，可选值：<br>`{kDontConvert, kDumpMem, kFileMmap}`
-sync_sst_file |bool  |convert_to_sst 为 `kFileMmap` 时，SST 转化完成后是否执行 fsync
+sync_sst_file |bool  |true  |convert_to_sst 为 `kFileMmap` 时，SST 转化完成后是否执行 fsync
 token_use_idle|bool  |true  |该选项用来优化 token ring，一般情况下使用默认值即可
 accurate_memsize|bool  |false  |仅用于测试，生产环境开启此选项会导致性能问题
 ### **[配置样例：使用 yaml](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.yaml#L69-L74)**
