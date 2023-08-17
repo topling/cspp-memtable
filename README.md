@@ -14,24 +14,18 @@ convert_to_sst|enum  |kDontConvert|直接将 MemTable **转化**为 SST，省去
 sync_sst_file |bool  |true  |convert_to_sst 为 `kFileMmap` 时，SST 转化完成后是否执行 fsync
 token_use_idle|bool  |true  |该选项用来优化 token ring，一般情况下使用默认值即可
 accurate_memsize|bool  |false  |仅用于测试，生产环境开启此选项会导致性能问题
-### **[配置样例：使用 yaml](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.yaml#L69-L74)**
-```yaml
-MemTableRepFactory:
-  cspp:
-    class: cspp
-    params:
-      mem_cap: 2G
-      use_vm: false
-      token_use_idle: true
-  skiplist:
-    class: SkipList
-    params:
-      lookahead: 0
-```
-在 yaml 中定义好 cspp 对象之后，这样[引用该 cspp memtable](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.yaml#L82)
-
-### **[配置样例：使用 json](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.json#L85-L93)**
-```json
+<table>
+  <tr align="center">
+    <td>
+<a href="https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.json#L85-L93">json 配置样例</a>
+    </td>
+    <td>
+<a href="https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.yaml#L69-L74">yaml 配置样例</a>
+    </td>
+  </tr>
+  <tr valign="top">
+    <td>
+<pre>
 "MemTableRepFactory": {
    "cspp": {
       "class": "cspp",
@@ -48,8 +42,33 @@ MemTableRepFactory:
       }
    }
 }
-```
-在 json 中定义好 cspp 对象之后，这样[引用该 cspp memtable](https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.json#L102)
+</pre>
+    </td>
+    <td>
+<pre>
+MemTableRepFactory:
+  cspp:
+    class: cspp
+    params:
+      mem_cap: 2G
+      use_vm: false
+      token_use_idle: true
+  skiplist:
+    class: SkipList
+    params:
+      lookahead: 0
+</pre>
+    </td>
+  </tr>
+  <tr align="center">
+    <td>
+      <a href="https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.json#L102">在 json 中引用该 cspp memtable</a>
+    </td>
+    <td>
+      <a href="https://github.com/topling/rockside/blob/master/sample-conf/lcompact_csppmemtab.yaml#L82">在 yaml 中引用该 cspp memtable</a>
+    </td>
+  </tr>
+</table>
 
 ## MemTable 直接转化成 SST
 MemTable 直接转化成 SST 是 ToplingDB 的特有功能，目前只有 CSPP MemTable 支持该功能。
@@ -149,7 +168,7 @@ export LD_LIBRARY_PATH=.:`find sideplugin -name lib_shared`:${LD_LIBRARY_PATH}
 * 注意：memtablerep_bench 仅测试 MemTableRep 的性能，调用链的开销很低
   * 如果在 DB 中使用 CSPP，主要耗时在于调用链开销，即便如此，最终的加速比也非常显著
 * 注意：memtablerep_bench 不支持多线程并发写，要测试多线程并发写，请使用 db_bench
-  * 例如：`db_bench -threads=10 -batch_size=100 -benchmarks=fillrandom `
+  * 例如：`db_bench -threads=10 -batch_size=100 -benchmarks=fillrandom`
 
 ## **背景**
 > 以下文档主要完成于 2018 年，之后进行了小幅修改和添加注解。
