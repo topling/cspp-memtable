@@ -149,8 +149,7 @@ export LD_LIBRARY_PATH=.:`find sideplugin -name lib_shared`:${LD_LIBRARY_PATH}
 * 注意：memtablerep_bench 仅测试 MemTableRep 的性能，调用链的开销很低
   * 如果在 DB 中使用 CSPP，主要耗时在于调用链开销，即便如此，最终的加速比也非常显著
 * 注意：memtablerep_bench 不支持多线程并发写，要测试多线程并发写，请使用 db_bench
-  * 例如：db_bench -threads=10 -batch_size=100 -benchmarks=fillrandom \\
-                  -json=path/to/db_bench_enterprise.yaml ...
+  * 例如：`db_bench -threads=10 -batch_size=100 -benchmarks=fillrandom `
 
 ## **背景**
 > 以下文档主要完成于 2018 年，之后进行了小幅修改和添加注解。
