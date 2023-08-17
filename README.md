@@ -2,7 +2,7 @@
 在 [ToplingDB](https://github.com/topling/toplingdb) 中，CSPP MemTable 在形式上是作为一个 SidePlugin 实现的，也就是说，要使用 CSPP MemTable，用户代码不需要任何修改，只需要改 json/yaml 配置文件。
 
 编译 ToplingDB 时，本模块(CSPP MemTable)由 ToplingDB 的 Makefile 中从 github 自动 clone 下来
-## **配置方式**
+## 一、配置方式
 cspp-memtable 在 [SidePlugin](https://github.com/topling/rockside/wiki) 中配置，类名是 `cspp`，配置参数：
 参数名        | 类型  |默认值| 说明
 --------------|:----:|:----:|------
@@ -70,7 +70,7 @@ MemTableRepFactory:
   </tr>
 </table>
 
-## MemTable 直接转化成 SST
+## 二、MemTable 直接转化成 SST
 MemTable 直接转化成 SST 是 ToplingDB 的特有功能，目前只有 CSPP MemTable 支持该功能。
 
 CSPP 可以直接在 ReadWrite 的文件 mmap 上操作，这是该功能得以有效实现的基础。
@@ -121,8 +121,8 @@ CSPPMemTab 创建时预分配的内存可以是文件 mmap，此时文件在创�
 DispatcherTable 从来不会创建 CSPPMemTabTable 的 SST，它只读取这种 SST。
 
 ### 最佳实践
-1. ColumnFamilyOptions::write_buffer_size 配置为较大的值（例如 2G，同时将 CSPPMemTab::mem_cap 设为 3G）
-1. ColumnFamilyOptions::max_bytes_for_level_base 不要配置（默认 = max(256M, write_buffer_size)）
+* ColumnFamilyOptions::write_buffer_size 配置为较大的值（例如 2G，同时将 CSPPMemTab::mem_cap 设为 3G）
+* ColumnFamilyOptions::max_bytes_for_level_base 不要配置（默认 = max(256M, write_buffer_size)）
 
 ### 直接转化 SST 的收益
 **1. 降低 CPU 用量**：MemTable Flush 过程中要扫描 MemTable 和创建 SST，去掉这些操作，自然也就去掉了相应的 CPU 消耗。
@@ -145,7 +145,7 @@ CSPP MemTable 直接转化成 SST，即便 SST 和 MemTable 同时被引用，�
 
 更好的方案是 MemTable 只存储索引，数据放在 WAL Log 中，参考 [Omit L0 Flush](https://github.com/topling/toplingdb/wiki/Omit-L0-Flush)，但是做到这一点工程量太大，需要修改的代码太多……
 
-## **memtablerep_bench**
+## 三、memtablerep_bench
 ToplingDB 在 RocksDB 的 memtablerep_bench 中加入了 cspp，以下脚本对比 skiplist 和 cspp（linux 下必须保证设置了足够的 `vm.nr_hugepages`）
 > linux kernel 5.14 以上可以自动检测 vm.nr_hugepages 不足导致的失败，旧版内核在 vm.nr_hugepages 不足时会发生 segfault 或 bus error，
 > 将 "use_hugepage": `true` 改成 `false` 即可，代价是性能会有少许损失。
@@ -169,7 +169,9 @@ export LD_LIBRARY_PATH=.:`find sideplugin -name lib_shared`:${LD_LIBRARY_PATH}
   * 如果在 DB 中使用 CSPP，主要耗时在于调用链开销，即便如此，最终的加速比也非常显著
 * 注意：memtablerep_bench 不支持多线程并发写，要测试多线程并发写，请使用 db_bench
   * 例如：`db_bench -threads=10 -batch_size=100 -benchmarks=fillrandom`
-
+---
+---
+---
 ## **背景**
 > 以下文档主要完成于 2018 年，之后进行了小幅修改和添加注解。
 
