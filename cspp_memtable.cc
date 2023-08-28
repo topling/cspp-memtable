@@ -611,9 +611,9 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     Update({}, js, r);
   }
   MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator& cmp,
-                                 Allocator*, const SliceTransform*,
+                                 Allocator* a, const SliceTransform* s,
                                  Logger* logger) final {
-    return CreateMemTableRep(std::string(), cmp, nullptr, nullptr, logger, 0);
+    return CreateMemTableRep(std::string(), cmp, a, s, logger, 0);
   }
   MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator& cmp,
                                  Allocator* a, const SliceTransform* s,
@@ -623,7 +623,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   MemTableRep* CreateMemTableRep(const std::string& level0_dir,
                                  const MemTableRep::KeyComparator& cmp,
                                  Allocator*, const SliceTransform*,
-                                 Logger* logger, uint32_t) final {
+                                 Logger* logger, uint32_t cf_id) final {
     auto uc = cmp.icomparator()->user_comparator();
     if (!uc->IsBytewise()) {
       return nullptr;
@@ -636,7 +636,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     if (ConvertKind::kFileMmap == curr_convert_to_sst) {
       // File mmap does not support hugepage
       conf|"&file_path="|level0_dir;
-      conf^"/cspp-%06zd.memtab"^curr_num;
+      conf^"/cspp-%06zd.memtab"^curr_num^"-"^cf_id;
     } else {
       conf|"&hugepage="|int(use_hugepage);
       if (vm_explicit_commit)
