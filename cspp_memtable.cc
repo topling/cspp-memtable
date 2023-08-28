@@ -408,6 +408,10 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   ~Iter() noexcept override;
   bool Valid() const final { return m_idx >= 0; }
   const char* varlen_key() const final { TERARK_DIE("Bad call"); }
+  Slice user_key() const final {
+    TERARK_ASSERT_GE(m_idx, 0);
+    return SliceOf(m_iter->word());
+  }
   Slice key() const final {
     TERARK_ASSERT_GE(m_idx, 0);
     fstring user_key = m_iter->word();
