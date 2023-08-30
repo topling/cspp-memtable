@@ -71,10 +71,7 @@ MemTableRepFactory:
 </table>
 
 ## 二、MemTable 直接转化成 SST
-MemTable 直接转化成 SST 是 ToplingDB 的特有功能，目前只有 CSPP MemTable 支持该功能。
-
-CSPP 可以直接在 ReadWrite 的文件 mmap 上操作，这是该功能得以有效实现的基础。
-> CSPP 为了实现高性能的多线程并发插入，使用了 Copy On Write，由此顺带获得了 Crash Safe 的效果，也就是说进程在任意时刻崩溃时，文件 mmap 上的 CSPP Trie 的状态都是一致的，实现了数据库 ACID 中的 ACD 三项。不过该功能目前尚未用到 Crash Safe。
+MemTable 直接转化成 SST 是 ToplingDB 的特有功能，目前只有 CSPP MemTable 支持该功能。CSPP 可以直接在 ReadWrite 的文件 mmap 上操作，这是该功能得以有效实现的基础。
 
 `convert_to_sst` 的三个枚举值：
 
@@ -138,6 +135,12 @@ CSPP MemTable 直接转化成 SST，即便 SST 和 MemTable 同时被引用，�
 **3. 减少 IO**：如果写得很快，并且脏页留存时间较长，并且我们在转化完 SST 之后不 fsync，并且很快发生了 Compact
 导致 MemTable 转化来的 SST 被删除，那么在操作系统内部，因为这些 SST 文件的 mmap 还没来得及写回到磁盘上，该 SST
 文件就被删除了，所以操作系统实际上就不再需要把这些内存写回磁盘，从而大幅降低 IO。
+
+### 关于 Crash Safe
+CSPP 为了实现高性能的多线程并发插入，使用了 Copy On Write，由此顺带获得了 Crash Safe 的效果，也就是说进程在任意时刻崩溃时，文件 mmap 上的 CSPP Trie 的状态都是一致的，实现了数据库 ACID 中的 ACD 三项。
+
+不过 MemTable 直接转化 SST 尚未用到 Crash Safe。
+
 
 ### 未来可能更近一步
 目前直接将 CSPP MemTable 转化为 SST，并不会大幅减少文件 IO，只是将这些 IO 分散到了写 MemTable 的过程中，
