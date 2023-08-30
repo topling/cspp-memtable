@@ -135,6 +135,7 @@ CSPP MemTable 直接转化成 SST，即便 SST 和 MemTable 同时被引用，�
 **3. 减少 IO**：如果写得很快，并且脏页留存时间较长，并且我们在转化完 SST 之后不 fsync，并且很快发生了 Compact
 导致 MemTable 转化来的 SST 被删除，那么在操作系统内部，因为这些 SST 文件的 mmap 还没来得及写回到磁盘上，该 SST
 文件就被删除了，所以操作系统实际上就不再需要把这些内存写回磁盘，从而大幅降低 IO。
+> （目前: 2023-08-30）xfs close file 时会顺带执行 fsync，不能发挥此优势；ext4 close file 时不会顺带 fsync，可以发挥此优势
 
 ### 关于 Crash Safe
 CSPP 为了实现高性能的多线程并发插入，使用了 Copy On Write，由此顺带获得了 Crash Safe 的效果，也就是说进程在任意时刻崩溃时，文件 mmap 上的 CSPP Trie 的状态都是一致的，实现了数据库 ACID 中的 ACD 三项。
