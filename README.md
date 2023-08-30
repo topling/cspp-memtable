@@ -119,7 +119,7 @@ DispatcherTable 从来不会创建 CSPPMemTabTable 的 SST，它只读取这种 
 
 ### 最佳实践
 * ColumnFamilyOptions::write_buffer_size 配置为较大的值（例如 2G，同时将 CSPPMemTab::mem_cap 设为 3G）
-* ColumnFamilyOptions::max_bytes_for_level_base 不要配置（默认 = max(256M, write_buffer_size)）
+* ColumnFamilyOptions::max_bytes_for_level_base 不要配置（默认 = write_buffer_size）
 
 ### 直接转化 SST 的收益
 **1. 降低 CPU 用量**：MemTable Flush 过程中要扫描 MemTable 和创建 SST，去掉这些操作，自然也就去掉了相应的 CPU 消耗。
