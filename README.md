@@ -71,7 +71,7 @@ MemTableRepFactory:
 </table>
 
 ## 二、MemTable 直接转化成 SST
-MemTable 直接转化成 SST 是 ToplingDB 的特有功能，目前只有 CSPP MemTable 支持该功能。CSPP 可以直接在 ReadWrite 的文件 mmap 上操作，这是该功能得以有效实现的基础。
+MemTable 直接转化成 SST 消除了 L0 Flush 操作，有巨大的收益，目前只有 CSPP MemTable 支持该功能。CSPP 可以直接在 ReadWrite 的文件 mmap 上操作，这是该功能得以有效实现的基础。
 
 `convert_to_sst` 的三个枚举值：
 
