@@ -1042,6 +1042,7 @@ try {
   builder.properties_.index_size = m_trie.mem_size_inline() -
                                    m_trie.mem_frag_size() -
                                    builder.properties_.data_size;
+  builder.properties_.tag_size = 8 * meta->num_entries; // zipped tag size
   Status s = builder.Finish();
   double t3 = clock->NowMicros();
   std::unique_ptr<MemTableRep::Iterator> iter(GetIterator(nullptr));
