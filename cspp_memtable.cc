@@ -12,8 +12,11 @@
 
 #include <terark/fsa/cspptrie.inl>
 #include <terark/num_to_str.hpp>
+#include <terark/util/vm_util.hpp>
+
 #if defined(OS_LINUX)
   #include <linux/mman.h>
+  #include <linux/version.h>
 #endif
 
 const char* git_version_hash_info_cspp_memtable();
@@ -857,17 +860,26 @@ void CSPPMemTab::MarkReadOnly() {
 void CSPPMemTab::MarkFlushed() {
   ROCKSDB_VERIFY(m_trie.is_readonly());
 #if defined(OS_LINUX)
- #if defined(MADV_COLD)
-  if (ConvertKind::kFileMmap != m_convert_to_sst) {
-    if (madvise(m_trie.mem_get(0), m_trie.mem_capacity(), MADV_COLD) != 0) {
-      ROCKS_LOG_WARN(m_log, "MarkFlushed: used = %zd, madvise(cap=%zd, cold) = %m",
-        m_trie.mem_size_inline(), m_trie.mem_capacity());
-    }
-  }
- #else
-  #pragma message "MADV_COLD is not defined because linux kernel is too old! CSPPMemTab still works OK!"
-  #pragma message "MADV_COLD is for mitigating memory waste by user code pinning DB snapshots for long time"
+ #if !defined(MADV_COLD)
+  const int MADV_COLD = 20;
  #endif
+  if (g_linux_kernel_version < KERNEL_VERSION(5,4,0)) {
+    return; // MADV_COLD requires kernel 5.4+
+  }
+  fstring cold; // to be MADV_COLD'ed
+  if (ConvertKind::kFileMmap == m_convert_to_sst) {
+    cold = m_trie.get_mmap();
+    TERARK_VERIFY_AL(size_t(cold.p), 4096);
+  } else {
+    cold = fstring((const char*)m_trie.mem_get(0), m_trie.mem_capacity());
+    if (size_t(cold.p) != 4096) // did not aligned if use malloc
+      cold = cold.substr(4096 - (size_t(cold.p) % 4096)); // cut to align
+  }
+  if (madvise((void*)cold.data(), cold.size(), MADV_COLD) != 0) {
+    ROCKS_LOG_WARN(m_log,
+     "MarkFlushed(%s): used = %zd, madvise(len=%zd, MADV_COLD) = %m",
+      m_trie.mmap_fpath().c_str(), m_trie.mem_size_inline(), cold.size());
+  }
 #endif
   m_is_flushed = true;
 }
