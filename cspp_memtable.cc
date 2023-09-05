@@ -143,6 +143,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   }
   void MarkReadOnly() final;
   void MarkFlushed() final;
+  void ColdizeMemory(const char* func);
   bool SupportConvertToSST() const final {
     return ConvertKind::kDontConvert != m_convert_to_sst;
   }
@@ -859,6 +860,10 @@ void CSPPMemTab::MarkReadOnly() {
 }
 void CSPPMemTab::MarkFlushed() {
   ROCKSDB_VERIFY(m_trie.is_readonly());
+  ColdizeMemory("CSPPMemTab::MarkFlushed");
+  m_is_flushed = true;
+}
+void CSPPMemTab::ColdizeMemory(const char* func) {
 #if defined(OS_LINUX)
  #if !defined(MADV_COLD)
   const int MADV_COLD = 20;
@@ -877,11 +882,10 @@ void CSPPMemTab::MarkFlushed() {
   }
   if (madvise((void*)cold.data(), cold.size(), MADV_COLD) != 0) {
     ROCKS_LOG_WARN(m_log,
-     "MarkFlushed(%s): used = %zd, madvise(len=%zd, MADV_COLD) = %m",
+     "%s(%s): used = %zd, madvise(len=%zd, MADV_COLD) = %m", func,
       m_trie.mmap_fpath().c_str(), m_trie.mem_size_inline(), cold.size());
   }
 #endif
-  m_is_flushed = true;
 }
 bool CSPPMemTab::GetRandomInternalKeysAppend
 (size_t num, std::vector<std::string>* output)
