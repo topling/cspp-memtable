@@ -293,38 +293,26 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
 bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
   TERARK_ASSERT_EQ(valsize, sizeof(uint32_t));
   auto trie = static_cast<MainPatricia*>(m_trie);
-#if 0
-  size_t vec_pin_pos = trie->mem_alloc(sizeof(VecPin));
-  TERARK_VERIFY_NE(vec_pin_pos, MainPatricia::mem_alloc_fail);
-  size_t entry_pos = trie->mem_alloc(sizeof(Entry));
-  TERARK_VERIFY_NE(entry_pos, MainPatricia::mem_alloc_fail);
-  size_t enc_val_pos = trie->mem_alloc(VarintLength(val_.size()) + val_.size());
-  TERARK_VERIFY_NE(enc_val_pos, MainPatricia::mem_alloc_fail);
-  encode_pre(val_, trie->mem_get(enc_val_pos));
-  auto entry = (Entry*)trie->mem_get(entry_pos);
-  auto vec_pin = (VecPin*)trie->mem_get(vec_pin_pos);
-#else
   // 1. one memory block, 3 logical blocks are contiguous, CPU cache friendly
   // 2. one memory block can be free'ed partially, we using this feature here
   constexpr size_t Align = trie->AlignSize;
   static_assert(Align == 4); // now it must be 4
   static_assert(sizeof(VecPin) % Align == 0);
   size_t enc_val_len = pow2_align_up(VarintLength(val_.size()) + val_.size(), Align);
-  size_t enc_val_pos = trie->mem_alloc(enc_val_len + sizeof(VecPin) + sizeof(Entry));
-  TERARK_VERIFY_NE(enc_val_pos, MainPatricia::mem_alloc_fail);
-  size_t vec_pin_pos = enc_val_pos + (enc_val_len / Align);
+  size_t vec_pin_pos = trie->mem_alloc(sizeof(VecPin) + sizeof(Entry) + enc_val_len);
+  TERARK_VERIFY_NE(vec_pin_pos, MainPatricia::mem_alloc_fail);
   size_t entry_pos = vec_pin_pos + (sizeof(VecPin) / Align);
-  auto enc_val_ptr = (byte_t*)trie->mem_get(enc_val_pos);
-  auto vec_pin = (VecPin*)(enc_val_ptr + enc_val_len);
+  size_t enc_val_pos = vec_pin_pos + ((sizeof(VecPin) + sizeof(Entry)) / Align);
+  auto vec_pin = (VecPin*)(trie->mem_get(vec_pin_pos));
   auto entry = (Entry*)(vec_pin + 1);
-  encode_pre(val_, enc_val_ptr);
-#endif
-  entry->pos = (uint32_t)enc_val_pos;
-  entry->tag = tag_;
+  auto enc_val_ptr = (byte_t*)(entry + 1);
+  *(uint32_t*)trie_valptr = (uint32_t)vec_pin_pos;
   vec_pin->pos = (uint32_t)entry_pos;
   vec_pin->cap = 1;
   vec_pin->num = 1;
-  *(uint32_t*)trie_valptr = (uint32_t)vec_pin_pos;
+  entry->pos = (uint32_t)enc_val_pos;
+  entry->tag = tag_;
+  encode_pre(val_, enc_val_ptr);
   return true;
 }
 terark_forceinline
