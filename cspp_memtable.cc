@@ -955,6 +955,10 @@ MemTableRepFactory* NewCSPPMemTabForPlain(const std::string& jstr) {
   const SidePluginRepo repo;
   return new CSPPMemTabFactory(js, repo);
 }
+// For debuging in gdb call this function by `print`
+void CSPPMemTab_print_mempool_stat(const CSPPMemTab* tab) {
+  tab->m_trie.print_mempool_stat(stderr);
+}
 /////////////////////////////////////////////////////////////////////////////
 ////  Use CSPPMemTab as TableReader
 /////////////////////////////////////////////////////////////////////////////
@@ -1056,6 +1060,7 @@ try {
       return Status::IOError(msg);
     }
   }
+  //m_trie.print_mempool_stat(stderr);
   double t2 = clock->NowMicros();
   builder.properties_.num_data_blocks = 1;
   builder.properties_.num_entries = meta->num_entries;
