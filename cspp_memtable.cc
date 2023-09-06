@@ -1042,7 +1042,19 @@ try {
   }
   CSPPMemTabTableBuilder builder(tbo, &writer);
   if (!is_file_mmap) {
-    m_trie.save_mmap([&](fstring data){ builder.DoWrite(data); });
+    try {
+      m_trie.save_mmap([&](fstring data){ builder.DoWrite(data); });
+    } catch (const Status& s) {
+      builder.Abandon();
+      fs->DeleteFile(fname, fopt.io_options, &dbg_ctx);
+      return s;
+    } catch (const std::exception& ex) {
+      string_appender<> msg;
+      msg|"CSPPMemTab::ConvertToSST("|fname|"): save_mmap() fail: "|ex.what();
+      builder.Abandon();
+      fs->DeleteFile(fname, fopt.io_options, &dbg_ctx);
+      return Status::IOError(msg);
+    }
   }
   double t2 = clock->NowMicros();
   builder.properties_.num_data_blocks = 1;
@@ -1060,6 +1072,9 @@ try {
                                    builder.properties_.data_size;
   builder.properties_.tag_size = 8 * meta->num_entries; // zipped tag size
   Status s = builder.Finish();
+  if (!s.ok()) {
+    return s;
+  }
   double t3 = clock->NowMicros();
   std::unique_ptr<MemTableRep::Iterator> iter(GetIterator(nullptr));
   iter->SeekToFirst();  meta->smallest.DecodeFrom(iter->key());
@@ -1082,9 +1097,10 @@ try {
   double t6 = clock->NowMicros();
   writer.Close();
   double t7 = clock->NowMicros();
-  ROCKS_LOG_INFO(m_log, "CSPPMemTab::ConvertToSST: time(ms): "
+  double fsize_mb = meta->fd.file_size / double(1<<20);
+  ROCKS_LOG_INFO(m_log, "CSPPMemTab::ConvertToSST(%s): fsize = %8.3f M, time(ms): "
     "open: %.3f, %s: %.3f, finish: %.3f, meta: %.3f, Flush: %.3f, sync: %.3f, close: %.3f, all: %.3f",
-    (t1-t0)/1e3, is_file_mmap ? "seek" : "write",
+    fname.c_str(), fsize_mb, (t1-t0)/1e3, is_file_mmap ? "seek" : "write",
     (t2-t1)/1e3, (t3-t2)/1e3, (t4-t3)/1e3, (t5-t4)/1e3, (t6-t5)/1e3, (t7-t6)/1e3, (t7-t0)/1e3);
   m_has_converted_to_sst = true;
   return s;
