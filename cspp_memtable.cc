@@ -594,7 +594,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   size_t chunk_size = 2 << 20; // 2MiB
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
-  uint64_t cumu_used_mem = 0;
+  uint64_t deactived_mem_sum = 0;
   MemTabLinkListNode m_head;
   mutable std::mutex m_mtx;
   CSPPMemTabFactory(const json& js, const SidePluginRepo& r) {
@@ -700,8 +700,6 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_PROP(djs, accurate_memsize);
     ROCKSDB_JSON_SET_ENUM(djs, convert_to_sst);
     ROCKSDB_JSON_SET_PROP(djs, sync_sst_file);
-    ROCKSDB_JSON_SET_PROP(djs, cumu_num);
-    ROCKSDB_JSON_SET_PROP(djs, live_num);
     ROCKSDB_JSON_SET_PROP(djs, cumu_iter_num);
     ROCKSDB_JSON_SET_PROP(djs, live_iter_num);
     size_t active_num = 0;
@@ -737,19 +735,21 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
         else
           detail_qlen|"*("|idx|","|cur_qlen|","|raw_iter|")*, ";
     }
-    size_t cnt = 1;
-    if (m_head.m_prev != &m_head) { // not empty
+    size_t deactived_num; // include history and living readonly memtab
+    if (LIKELY(m_head.m_prev != &m_head)) { // not empty
       // m_head.m_prev is the most recent memtab in the list
       // likely be same with cumu_num, when racing, may be not same
-      cnt = static_cast<CSPPMemTab*>(m_head.m_prev)->m_instance_idx + 1;
+      deactived_num = static_cast<CSPPMemTab*>(m_head.m_prev)->m_instance_idx + 1;
+    } else { // very very unlikely goes here
+      deactived_num = cumu_num; // not accurate on racing
     }
     m_mtx.unlock();
-    cnt -= active_num; // cumu_used_mem does not include active memtab
-    auto cumu_used_mem = this->cumu_used_mem;
-    auto avg_used_mem = cnt ? cumu_used_mem / cnt : 0;
-    ROCKSDB_JSON_SET_SIZE(djs, avg_used_mem);
-    djs["cumu_used_mem"] = SizeToString(cumu_used_mem) + ", " +
-                           SizeToString(cumu_used_mem + active_used_mem);
+    deactived_num -= active_num; // more accurate than deactived_mem_sum
+    auto deactived_mem_sum = this->deactived_mem_sum; // not accurate on racing
+    auto deactived_mem_avg = deactived_num ? deactived_mem_sum / deactived_num : 0;
+    ROCKSDB_JSON_SET_PROP(djs, deactived_num);     // more accurate
+    ROCKSDB_JSON_SET_SIZE(djs, deactived_mem_sum); // less accurate
+    ROCKSDB_JSON_SET_SIZE(djs, deactived_mem_avg); // less accurate
     if (detail_qlen.size() >= 4) {
       detail_qlen.end()[-2] = ' ';
       detail_qlen.end()[-1] = ']';
@@ -758,6 +758,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     }
     ROCKSDB_JSON_SET_SIZE(djs, active_used_mem);
     ROCKSDB_JSON_SET_SIZE(djs, live_used_mem);
+    ROCKSDB_JSON_SET_PROP(djs, live_num);
     ROCKSDB_JSON_SET_PROP(djs, token_qlen);
     ROCKSDB_JSON_SET_PROP(djs, total_raw_iter);
     djs["comment"] = "(idx, qlen, raw_iter_num), <strong>strong: flushed</strong>, normal: readonly, <em>em: active</em>";
@@ -855,7 +856,7 @@ CSPPMemTab::~CSPPMemTab() noexcept {
 }
 void CSPPMemTab::MarkReadOnly() {
   auto used = m_trie.mem_size_inline();
-  as_atomic(m_fac->cumu_used_mem).fetch_add(used, std::memory_order_relaxed);
+  as_atomic(m_fac->deactived_mem_sum).fetch_add(used, std::memory_order_relaxed);
   m_trie.set_readonly();
 }
 void CSPPMemTab::MarkFlushed() {
@@ -1227,7 +1228,7 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
   m_memtab.reset(new CSPPMemTab(isReverseBytewiseOrder_, tro.ioptions.logger,
                                 memtab_fac, curr_num));
   m_memtab->m_trie.self_mmap_user_mem(file_data);
-  as_atomic(memtab_fac->cumu_used_mem)
+  as_atomic(memtab_fac->deactived_mem_sum)
            .fetch_add(file_data.size(), std::memory_order_relaxed);
   m_factory = f;
   //fprintf(stderr, "CSPPMemTabTableReader: %s: %s\n",
