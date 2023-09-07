@@ -1227,6 +1227,8 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
   m_memtab.reset(new CSPPMemTab(isReverseBytewiseOrder_, tro.ioptions.logger,
                                 memtab_fac, curr_num));
   m_memtab->m_trie.self_mmap_user_mem(file_data);
+  as_atomic(memtab_fac->cumu_used_mem)
+           .fetch_add(file_data.size(), std::memory_order_relaxed);
   m_factory = f;
   //fprintf(stderr, "CSPPMemTabTableReader: %s: %s\n",
   //  file->file_name().c_str(), m_memtab->m_trie.str_stat().c_str());
