@@ -680,7 +680,6 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   }
   json ToJson(const json& d) const {
     size_t mem_cap = m_mem_cap;
-    auto avg_used_mem = cumu_num ? cumu_used_mem / cumu_num : 0;
     bool html = JsonSmartBool(d, "html");
     json djs;
     if (html) {
@@ -705,8 +704,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_PROP(djs, live_num);
     ROCKSDB_JSON_SET_PROP(djs, cumu_iter_num);
     ROCKSDB_JSON_SET_PROP(djs, live_iter_num);
-    ROCKSDB_JSON_SET_SIZE(djs, avg_used_mem);
-    ROCKSDB_JSON_SET_SIZE(djs, cumu_used_mem);
+    size_t active_num = 0;
     size_t active_used_mem = 0;
     size_t live_used_mem = 0;
     size_t token_qlen = 0;
@@ -719,6 +717,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
       auto memtab = static_cast<CSPPMemTab*>(node);
       live_used_mem += memtab->m_trie.mem_size_inline();
       if (!memtab->m_trie.is_readonly())
+        active_num++,
         active_used_mem += memtab->m_trie.mem_size_inline();
       size_t idx = memtab->m_instance_idx;
       size_t raw_iter = memtab->m_trie.live_iter_num();
@@ -738,7 +737,19 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
         else
           detail_qlen|"*("|idx|","|cur_qlen|","|raw_iter|")*, ";
     }
+    size_t cnt = 1;
+    if (m_head.m_prev != &m_head) { // not empty
+      // m_head.m_prev is the most recent memtab in the list
+      // likely be same with cumu_num, when racing, may be not same
+      cnt = static_cast<CSPPMemTab*>(m_head.m_prev)->m_instance_idx + 1;
+    }
     m_mtx.unlock();
+    cnt -= active_num; // cumu_used_mem does not include active memtab
+    auto cumu_used_mem = this->cumu_used_mem;
+    auto avg_used_mem = cnt ? cumu_used_mem / cnt : 0;
+    ROCKSDB_JSON_SET_SIZE(djs, avg_used_mem);
+    djs["cumu_used_mem"] = SizeToString(cumu_used_mem) + ", " +
+                           SizeToString(cumu_used_mem + active_used_mem);
     if (detail_qlen.size() >= 4) {
       detail_qlen.end()[-2] = ' ';
       detail_qlen.end()[-1] = ']';
