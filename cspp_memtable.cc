@@ -1070,13 +1070,6 @@ try {
   builder.properties_.num_merge_operands = meta->num_merges;
   builder.properties_.raw_key_size = meta->raw_key_size;
   builder.properties_.raw_value_size = meta->raw_value_size;
-  auto per_idx_len = sizeof(uint32_t) + sizeof(VecPin) + sizeof(Entry);
-  builder.properties_.data_size = meta->raw_value_size +
-                                  per_idx_len * m_trie.num_words();
-  builder.properties_.index_size = m_trie.mem_size_inline() -
-                                   m_trie.mem_frag_size() -
-                                   builder.properties_.data_size;
-  builder.properties_.tag_size = 8 * meta->num_entries; // zipped tag size
   Status s = builder.Finish();
   if (!s.ok()) {
     return s;
@@ -1203,7 +1196,6 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
     Slice file_data, const TableReaderOptions& tro,
     const CSPPMemTabTableFactory* f) {
   LoadCommonPart(file, tro, file_data, kCSPPMemTabMagic);
-  table_properties_->compression_name = "CSPPMemTab";
   auto memtab_fac = f->memtable_factory.get();
   auto curr_num = as_atomic(memtab_fac->cumu_num)
                  .fetch_add(1, std::memory_order_relaxed);
@@ -1212,11 +1204,19 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
   m_memtab->m_trie.self_mmap_user_mem(file_data);
   as_atomic(memtab_fac->deactived_mem_sum)
            .fetch_add(file_data.size(), std::memory_order_relaxed);
+  table_properties_->compression_name = "CSPPMemTab";
   table_properties_->compression_options.clear();
   as_string_appender(table_properties_->compression_options)
     | "Free = "|SizeToString(m_memtab->m_trie.mem_frag_size());
   as_string_appender(table_properties_->compression_options)
     ^ ", %.2f%%" ^ 100.0*m_memtab->m_trie.mem_frag_size()/file_data_.size();
+
+  table_properties_->tag_size = 8 * table_properties_->num_entries;
+  table_properties_->data_size = table_properties_->raw_value_size;
+  table_properties_->index_size = m_memtab->m_trie.mem_size_inline() -
+                                  m_memtab->m_trie.mem_frag_size() -
+                                  table_properties_->data_size -
+                                  table_properties_->tag_size;
   m_factory = f;
   //fprintf(stderr, "CSPPMemTabTableReader: %s: %s\n",
   //  file->file_name().c_str(), m_memtab->m_trie.str_stat().c_str());
