@@ -595,7 +595,6 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
   uint64_t cumu_used_mem = 0;
-  size_t m_memtab_num = 0;
   MemTabLinkListNode m_head;
   mutable std::mutex m_mtx;
   CSPPMemTabFactory(const json& js, const SidePluginRepo& r) {
@@ -713,7 +712,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     size_t token_qlen = 0;
     size_t total_raw_iter = 0;
     string_appender<> detail_qlen;
-    detail_qlen.reserve(128*m_memtab_num);
+    detail_qlen.reserve(128*live_num);
     detail_qlen << "[ ";
     m_mtx.lock();
     for (auto node = m_head.m_next; node != &m_head; node = node->m_next) {
@@ -811,9 +810,8 @@ inline void CSPPMemTab::init(bool rev, Logger* log, CSPPMemTabFactory* f) {
   m_read_by_writer_token = f->read_by_writer_token;
   m_token_use_idle = f->token_use_idle;
   m_accurate_memsize = f->accurate_memsize;
-  as_atomic(f->live_num).fetch_add(1, std::memory_order_relaxed);
   f->m_mtx.lock();
-  f->m_memtab_num++;
+  f->live_num++;
   m_next = &f->m_head; // insert 'this' at linked list tail
   m_prev = f->m_head.m_prev;
   m_next->m_prev = this;
@@ -830,9 +828,8 @@ CSPPMemTab::~CSPPMemTab() noexcept {
       m_is_sst, m_instance_idx, m_live_iter_num);
   }
 #endif
-  as_atomic(m_fac->live_num).fetch_sub(1, std::memory_order_relaxed);
   m_fac->m_mtx.lock();
-  m_fac->m_memtab_num--;
+  m_fac->live_num--;
   m_next->m_prev = m_prev; // remove 'this' from linked list
   m_prev->m_next = m_next;
   m_fac->m_mtx.unlock();
