@@ -1228,7 +1228,9 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
            .fetch_add(file_data.size(), std::memory_order_relaxed);
   table_properties_->compression_options.clear();
   as_string_appender(table_properties_->compression_options)
-    | "Unused = "|SizeToString(m_memtab->m_trie.mem_frag_size());
+    | "Free = "|SizeToString(m_memtab->m_trie.mem_frag_size());
+  as_string_appender(table_properties_->compression_options)
+    ^ ", %.2f%%" ^ 100.0*m_memtab->m_trie.mem_frag_size()/file_data_.size();
   m_factory = f;
   //fprintf(stderr, "CSPPMemTabTableReader: %s: %s\n",
   //  file->file_name().c_str(), m_memtab->m_trie.str_stat().c_str());
