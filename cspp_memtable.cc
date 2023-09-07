@@ -1217,10 +1217,6 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
     Slice file_data, const TableReaderOptions& tro,
     const CSPPMemTabTableFactory* f) {
   LoadCommonPart(file, tro, file_data, kCSPPMemTabMagic);
-  if (!fstring(table_properties_->compression_options).strstr("allseq0")) {
-    // special case: if entry.valueMul, global_seqno_ must be 0
-    global_seqno_ = 0;
-  }
   table_properties_->compression_name = "CSPPMemTab";
   auto memtab_fac = f->memtable_factory.get();
   auto curr_num = as_atomic(memtab_fac->cumu_num)
@@ -1230,6 +1226,9 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
   m_memtab->m_trie.self_mmap_user_mem(file_data);
   as_atomic(memtab_fac->deactived_mem_sum)
            .fetch_add(file_data.size(), std::memory_order_relaxed);
+  table_properties_->compression_options.clear();
+  as_string_appender(table_properties_->compression_options)
+    | "Unused = "|SizeToString(m_memtab->m_trie.mem_frag_size());
   m_factory = f;
   //fprintf(stderr, "CSPPMemTabTableReader: %s: %s\n",
   //  file->file_name().c_str(), m_memtab->m_trie.str_stat().c_str());
