@@ -1150,20 +1150,6 @@ public:
     return JsonToString(djs, d);
   }
   std::shared_ptr<CSPPMemTabFactory> memtable_factory;
-
-  // stats
-  mutable long long start_time_point_;
-  mutable long long build_time_duration_; // exclude idle time
-  mutable size_t num_writers_;
-  mutable size_t num_readers_;
-  mutable size_t sum_full_key_len_;
-  mutable size_t sum_user_key_len_;
-  mutable size_t sum_user_key_cnt_;
-  mutable size_t sum_value_len_;
-  mutable size_t sum_entry_cnt_; // of all writers(builders)
-  mutable size_t sum_index_len_;
-  mutable size_t sum_index_num_;
-  mutable size_t sum_multi_num_;
 };
 class CSPPMemTabTableReader : public TopTableReaderBase {
 public:
@@ -1234,12 +1220,10 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
   m_factory = f;
   //fprintf(stderr, "CSPPMemTabTableReader: %s: %s\n",
   //  file->file_name().c_str(), m_memtab->m_trie.str_stat().c_str());
-  as_atomic(m_factory->num_readers_).fetch_add(1, std::memory_order_relaxed);
 }
 CSPPMemTabTableReader::~CSPPMemTabTableReader() {
   TERARK_VERIFY_EZ(m_memtab->m_live_iter_num);
   m_memtab.reset(nullptr); // explicit delete
-  as_atomic(m_factory->num_readers_).fetch_sub(1, std::memory_order_relaxed);
 }
 std::string
 CSPPMemTabTableReader::ToWebViewString(const json& dump_options) const {
