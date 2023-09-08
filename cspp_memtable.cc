@@ -6,6 +6,7 @@
 
 // dump cspp memtable as sst
 #include "file/filename.h"
+#include "monitoring/iostats_context_imp.h"
 #include "table/top_table_builder.h"
 #include "table/top_table_reader.h"
 #include "topling/builtin_table_factory.h"
@@ -987,7 +988,7 @@ public:
     WriteBlock(data, file_, &offset_); // ignore ret
   }
 };
-static void SeekToEnd(WritableFileWriter& writer, Logger* log) {
+static size_t SeekToEnd(WritableFileWriter& writer, Logger* log) {
   auto fs_file = writer.writable_file();
   auto fd = fs_file->FileDescriptor();
 #if defined(_MSC_VER)
@@ -1004,6 +1005,7 @@ static void SeekToEnd(WritableFileWriter& writer, Logger* log) {
 #endif
   fs_file->SetFileSize(endpos);
   writer.SetFileSize(endpos);
+  return size_t(endpos);
 }
 Status CSPPMemTab::ConvertToSST(FileMetaData* meta,
                                 const TableBuilderOptions& tbo)
@@ -1013,6 +1015,7 @@ try {
   auto* fs = ioptions.fs.get();
   double t0 = clock->NowMicros();
   ROCKSDB_VERIFY_NE(m_convert_to_sst, ConvertKind::kDontConvert);
+  bool sync_sst_file = m_fac->sync_sst_file; // consitency param snapshot
   IODebugContext dbg_ctx;
   FileOptions fopt;
   fopt.allow_fallocate = false;
@@ -1043,7 +1046,11 @@ try {
   WritableFileWriter writer(std::move(fs_file), fname, fopt, ioptions.clock,
               nullptr, ioptions.statistics.get(), ioptions.listeners);
   if (is_file_mmap) {
-    SeekToEnd(writer, m_log);
+    auto endpos = SeekToEnd(writer, m_log);
+    ROCKSDB_VERIFY_EQ(m_trie.get_mmap().size(), endpos);
+    if (sync_sst_file) { // when not sync, data maybe not write to hardware
+      IOSTATS_ADD(bytes_written, endpos); // data will write to hardware
+    }
   }
   CSPPMemTabTableBuilder builder(tbo, &writer);
   if (!is_file_mmap) {
@@ -1090,7 +1097,7 @@ try {
   double t4 = clock->NowMicros();
   s = writer.Flush(); // not sync
   double t5 = clock->NowMicros();
-  if (m_fac->sync_sst_file) {
+  if (sync_sst_file) {
     s = writer.writable_file()->Fsync(fopt.io_options, &dbg_ctx);
   }
   double t6 = clock->NowMicros();
