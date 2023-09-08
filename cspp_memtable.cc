@@ -1048,9 +1048,7 @@ try {
   if (is_file_mmap) {
     auto endpos = SeekToEnd(writer, m_log);
     ROCKSDB_VERIFY_EQ(m_trie.get_mmap().size(), endpos);
-    if (sync_sst_file) { // when not sync, data maybe not write to hardware
-      IOSTATS_ADD(bytes_written, endpos); // data will write to hardware
-    }
+    IOSTATS_ADD(bytes_written, endpos);
   }
   CSPPMemTabTableBuilder builder(tbo, &writer);
   if (!is_file_mmap) {
