@@ -75,6 +75,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     uint64_t tag_ = UINT64_MAX;
     Slice val_;
     bool init_value(void* trie_valptr, size_t trie_valsize) noexcept final;
+    void destroy_value(void* valptr, size_t valsize) noexcept final;
     bool insert_for_dup_user_key();
   };
   bool insert_kv(fstring ikey, const Slice& val, Token*);
@@ -316,12 +317,23 @@ bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
   encode_pre(val_, enc_val_ptr);
   return true;
 }
+void CSPPMemTab::Token::destroy_value(void* trie_valptr, size_t valsize) noexcept {
+  // should be called very rarely: multi threads racing insert same user_key.
+  // if do nothing, the memory block allocated in init_value will be leaked.
+  TERARK_ASSERT_EQ(valsize, sizeof(uint32_t));
+  auto trie = static_cast<MainPatricia*>(m_trie);
+  size_t const Align = trie->AlignSize;
+  size_t vec_pin_pos = *(const uint32_t*)trie_valptr;
+  size_t enc_val_len = pow2_align_up(VarintLength(val_.size()) + val_.size(), Align);
+  size_t mem_block_len = sizeof(VecPin) + sizeof(Entry) + enc_val_len;
+  trie->mem_free(vec_pin_pos, mem_block_len); // free right now, not lazy free
+}
 terark_forceinline
 bool CSPPMemTab::insert_kv(fstring ikey, const Slice& val, Token* tok) {
   fstring user_key(ikey.data(), ikey.size() - 8);
   tok->tag_ = DecodeFixed64(user_key.end());
   tok->val_ = val;
-  uint32_t value_storage = 0;
+  uint32_t value_storage = UINT32_MAX;
   if (LIKELY(m_trie.insert(user_key, &value_storage, tok))) {
     TERARK_VERIFY_S(tok->has_value(), "OOM: mem_cap=%zd is too small: %s",
                     m_trie.mem_capacity(), m_trie.mmap_fpath());
