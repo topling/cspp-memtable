@@ -30,6 +30,8 @@ struct MemTabLinkListNode {
   MemTabLinkListNode *m_prev, *m_next;
 };
 struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
+  static constexpr size_t Align = MainPatricia::AlignSize;
+  static_assert(Align == 4);
 #pragma pack(push, 4)
   struct Entry {
     uint64_t tag;
@@ -297,7 +299,6 @@ bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
   auto trie = static_cast<MainPatricia*>(m_trie);
   // 1. one memory block, 3 logical blocks are contiguous, CPU cache friendly
   // 2. one memory block can be free'ed partially, we using this feature here
-  constexpr size_t Align = trie->AlignSize;
   static_assert(Align == 4); // now it must be 4
   static_assert(sizeof(VecPin) % Align == 0);
   size_t enc_val_len = pow2_align_up(VarintLength(val_.size()) + val_.size(), Align);
@@ -322,7 +323,6 @@ void CSPPMemTab::Token::destroy_value(void* trie_valptr, size_t valsize) noexcep
   // if do nothing, the memory block allocated in init_value will be leaked.
   TERARK_ASSERT_EQ(valsize, sizeof(uint32_t));
   auto trie = static_cast<MainPatricia*>(m_trie);
-  size_t const Align = trie->AlignSize;
   size_t vec_pin_pos = *(const uint32_t*)trie_valptr;
   size_t enc_val_len = pow2_align_up(VarintLength(val_.size()) + val_.size(), Align);
   size_t mem_block_len = sizeof(VecPin) + sizeof(Entry) + enc_val_len;
@@ -396,14 +396,22 @@ bool CSPPMemTab::Token::insert_for_dup_user_key() {
 struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   Patricia::Iterator* m_iter;
   CSPPMemTab* m_tab;
+  const char* m_mempool = nullptr; // used for speed up memory access
+  const VecPin* m_vec_pin = nullptr; // used for speed up memory access
   int         m_idx = -1;
   bool        m_rev;
   struct EntryVec { int num; const Entry* vec; };
-  terark_forceinline EntryVec GetEntryVec() const {
-    auto trie = &m_tab->m_trie;
-    auto vec_pin = (VecPin*)trie->mem_get(trie->value_of<uint32_t>(*m_iter));
+  terark_forceinline EntryVec GetEntryVec() {
+    assert(m_iter->has_value());
+    auto mempool = m_mempool;
+    auto vec_pin_pos = *(uint32_t*)(mempool + m_iter->get_valpos());
+    auto vec_pin_ptr = (VecPin*)(mempool + Align * vec_pin_pos);
+    m_vec_pin = vec_pin_ptr; // save to m_vec_pin for laster use for speed up
+    return AccessEntryVec(vec_pin_ptr);
+  }
+  terark_forceinline EntryVec AccessEntryVec(const VecPin* vec_pin) const {
     auto entry_num = int(vec_pin->num & ~LOCK_FLAG);
-    auto entry_vec = (Entry*)trie->mem_get(vec_pin->pos);
+    auto entry_vec = (Entry*)(m_mempool + Align * vec_pin->pos);
     return { entry_num, entry_vec };
   }
   terark_forceinline void AppendTag(uint64_t tag) const {
@@ -424,11 +432,10 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   }
   Slice value() const final {
     TERARK_ASSERT_GE(m_idx, 0);
-    auto trie = &m_tab->m_trie;
-    auto vec_pin = (VecPin*)trie->mem_get(trie->value_of<uint32_t>(*m_iter));
-    auto entry = (Entry*)trie->mem_get(vec_pin->pos);
+    auto mempool = m_mempool;
+    auto entry = (const Entry*)(mempool + Align * m_vec_pin->pos);
     auto enc_val_pos = entry[m_idx].pos;
-    return GetLengthPrefixedSlice((const char*)trie->mem_get(enc_val_pos));
+    return GetLengthPrefixedSlice(mempool + Align * enc_val_pos);
   }
   std::pair<Slice, Slice>
   GetKeyValue() const final { return {key(), value()}; }
@@ -445,8 +452,8 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
       auto entry = GetEntryVec();
       AppendTag(entry.vec[m_idx = entry.num - 1].tag);
     } else {
-      auto entry = GetEntryVec();
-      AppendTag(entry.vec[m_idx].tag);
+      auto entry = (const Entry*)(m_mempool + Align * m_vec_pin->pos);
+      AppendTag(entry[m_idx].tag);
     }
     return true;
   }
@@ -467,7 +474,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   }
   bool PrevAndCheckValid() final {
     TERARK_ASSERT_GE(m_idx, 0);
-    auto entry = GetEntryVec();
+    auto entry = AccessEntryVec(m_vec_pin);
     if (++m_idx == entry.num) {
       if (UNLIKELY(!(m_rev ? m_iter->incr() : m_iter->decr()))) {
         m_idx = -1;
@@ -798,6 +805,7 @@ CSPPMemTab::Iter::Iter(CSPPMemTab* tab) {
   m_tab = tab;
   m_rev = tab->m_rev;
   m_iter = nullptr;
+  m_mempool = (const char*)tab->m_trie.mem_get(0);
 }
 CSPPMemTab::Iter::~Iter() noexcept {
   if (m_iter) {
