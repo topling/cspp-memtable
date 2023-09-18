@@ -1127,6 +1127,7 @@ try {
     fname.c_str(), fsize_mb, (t1-t0)/1e3, is_file_mmap ? "seek" : "write",
     (t2-t1)/1e3, (t3-t2)/1e3, (t4-t3)/1e3, (t5-t4)/1e3, (t6-t5)/1e3, (t7-t6)/1e3, (t7-t0)/1e3);
   m_has_converted_to_sst = true;
+  m_is_flushed = true;
   return s;
 }
 catch (const std::exception& ex) {
