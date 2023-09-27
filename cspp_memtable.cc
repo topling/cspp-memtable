@@ -100,28 +100,28 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       m_is_empty = false;
     }
     Token* token;
-    // SkipListMemTable use `*hint` as last insertion position,
-    // We use `*hint` as the tls writer token ptr with flag
-    if (hint) { // to avoid calling of tls_writer_token_nn
-      if (auto& ptr_with_flag = (uintptr_t&)(*hint)) {
-        assert(ptr_with_flag & 1);
-        token = (Token*)(ptr_with_flag & ~uintptr_t(1));
-        assert(m_trie.tls_writer_token_nn<Token>() == token);
-      } else {
-        token = m_trie.tls_writer_token_nn<Token>();
-        ptr_with_flag = uintptr_t(token) | 1; // indicate don't delete `*hint`
-      }
+    // SkipListMemTable use `*hint` as last insertion position, We use `*hint`
+    // as the tls writer token ptr to avoid calling of tls_writer_token_nn
+    assert(nullptr != hint);
+    if (auto token_pp = (Token**)(hint)) {
+      token = *token_pp;
+      assert(m_trie.tls_writer_token_nn<Token>() == token);
     } else {
       token = m_trie.tls_writer_token_nn<Token>();
+      *token_pp = token;
+      token->acquire(&m_trie);
     }
-    token->acquire(&m_trie);
     auto ret = insert_kv(k, v, token);
-    m_token_use_idle ? token->idle() : token->release();
     return ret;
   }
   bool InsertKeyValueWithHintConcurrently(const Slice& k, const Slice& v,
                                           void** hint) final {
     return InsertKeyValueWithHint(k, v, hint);
+  }
+  void FinishHint(void* hint) final {
+    assert(nullptr != hint);
+    auto token = (Token*)hint;
+    m_token_use_idle ? token->idle() : token->release();
   }
   inline Patricia::TokenBase* reader_token() const {
     if (m_read_by_writer_token)
