@@ -99,20 +99,17 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     if (UNLIKELY(m_is_empty)) { // must check, avoid write as possible
       m_is_empty = false;
     }
-    Token* token;
     // SkipListMemTable use `*hint` as last insertion position, We use `*hint`
     // as the tls writer token ptr to avoid calling of tls_writer_token_nn
     assert(nullptr != hint);
-    if (auto& token_ref = *(Token**)(hint)) {
-      token = token_ref;
+    Token*& token = *(Token**)(hint);
+    if (LIKELY(nullptr != token)) {
       assert(m_trie.tls_writer_token_nn<Token>() == token);
     } else {
       token = m_trie.tls_writer_token_nn<Token>();
-      token_ref = token;
       token->acquire(&m_trie);
     }
-    auto ret = insert_kv(k, v, token);
-    return ret;
+    return insert_kv(k, v, token);
   }
   bool InsertKeyValueWithHintConcurrently(const Slice& k, const Slice& v,
                                           void** hint) final {
