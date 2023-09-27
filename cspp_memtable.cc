@@ -81,7 +81,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     bool insert_for_dup_user_key();
   };
   bool insert_kv(fstring ikey, const Slice& val, Token*);
-  bool InsertKeyValue(const Slice& ikey, const Slice& val) final {
+  bool InsertKeyValueConcurrently(const Slice& ikey, const Slice& val) final {
     if (UNLIKELY(m_is_empty)) { // must check, avoid write as possible
       m_is_empty = false;
     }
@@ -91,11 +91,11 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     m_token_use_idle ? token->idle() : token->release();
     return ret;
   }
-  bool InsertKeyValueConcurrently(const Slice& k, const Slice& v) final {
-    return InsertKeyValue(k, v);
+  bool InsertKeyValue(const Slice& k, const Slice& v) final {
+    return InsertKeyValueConcurrently(k, v);
   }
-  bool InsertKeyValueWithHint(const Slice& k, const Slice& v, void** hint)
-  final {
+  bool InsertKeyValueWithHintConcurrently(const Slice& k, const Slice& v,
+                                          void** hint) final {
     if (UNLIKELY(m_is_empty)) { // must check, avoid write as possible
       m_is_empty = false;
     }
@@ -111,9 +111,9 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     }
     return insert_kv(k, v, token);
   }
-  bool InsertKeyValueWithHintConcurrently(const Slice& k, const Slice& v,
-                                          void** hint) final {
-    return InsertKeyValueWithHint(k, v, hint);
+  bool InsertKeyValueWithHint(const Slice& k, const Slice& v, void** hint)
+  final {
+    return InsertKeyValueWithHintConcurrently(k, v, hint);
   }
   void FinishHint(void* hint) final {
     assert(nullptr != hint);
