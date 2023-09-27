@@ -103,12 +103,12 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     // SkipListMemTable use `*hint` as last insertion position, We use `*hint`
     // as the tls writer token ptr to avoid calling of tls_writer_token_nn
     assert(nullptr != hint);
-    if (auto token_pp = (Token**)(hint)) {
-      token = *token_pp;
+    if (auto& token_ref = *(Token**)(hint)) {
+      token = token_ref;
       assert(m_trie.tls_writer_token_nn<Token>() == token);
     } else {
       token = m_trie.tls_writer_token_nn<Token>();
-      *token_pp = token;
+      token_ref = token;
       token->acquire(&m_trie);
     }
     auto ret = insert_kv(k, v, token);
