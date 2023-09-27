@@ -202,7 +202,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   ROCKSDB_FLATTEN
   void Get(const ReadOptions& ro, const LookupKey& k, void* callback_args,
            bool(*callback_func)(void*, const KeyValuePair&)) final {
-    if (m_is_empty) {
+    if (UNLIKELY(m_is_empty)) {
       return;
     }
     const Slice ikey = k.internal_key();
