@@ -406,8 +406,9 @@ bool CSPPMemTab::Token::insert_for_dup_user_key() {
     entry_cow[idx].tag = tag_;
     memcpy(entry_cow + idx+1, entry_old + idx, sizeof(Entry)*(num-idx));
   }
-  as_atomic(vec_pin->pos).store((uint32_t)entry_cow_pos, std::memory_order_release);
-  as_atomic(vec_pin->cap).store(new_cap, std::memory_order_release);
+  vec_pin->pos = (uint32_t)entry_cow_pos; // not need atomic
+  vec_pin->cap = new_cap;                 // not need atomic
+  // this memory_order_release makes all previous write visiable to other CPUs
   // vec_pin->num.store also clears LOCK_FLAG
   as_atomic(vec_pin->num).store(num + 1, std::memory_order_release);
   trie->mem_lazy_free(entry_old_pos, sizeof(Entry) * num);
