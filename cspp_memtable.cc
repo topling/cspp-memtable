@@ -192,6 +192,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     return m_trie.mem_size_inline();
 #endif
   }
+  uint64_t ApproximateNumEntries(const Slice&, const Slice&) final;
   struct KeyValueForGet : public KeyValuePair {
     inline static Slice cp(Slice ikey, void* buf) {
       memcpy(buf, ikey.data_, ikey.size_ - 8); // just copy user key
@@ -632,6 +633,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   bool   token_use_idle = true;
   bool   accurate_memsize = false; // mainly for debug and unit test
   bool   sync_sst_file = true;
+  bool   enableApproximateNumEntries = false; // may be pretty not accurate
   ConvertKind convert_to_sst = ConvertKind::kDontConvert;
   size_t chunk_size = 2 << 20; // 2MiB
   size_t cumu_num = 0, cumu_iter_num = 0;
@@ -704,6 +706,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_OPT_PROP(js, accurate_memsize);
     ROCKSDB_JSON_OPT_ENUM(js, convert_to_sst);
     ROCKSDB_JSON_OPT_PROP(js, sync_sst_file);
+    ROCKSDB_JSON_OPT_PROP(js, enableApproximateNumEntries);
     iter = js.find("chunk_size");
     if (js.end() != iter) {
       ROCKSDB_JSON_OPT_SIZE(js, chunk_size);
@@ -742,6 +745,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_PROP(djs, accurate_memsize);
     ROCKSDB_JSON_SET_ENUM(djs, convert_to_sst);
     ROCKSDB_JSON_SET_PROP(djs, sync_sst_file);
+    ROCKSDB_JSON_SET_PROP(djs, enableApproximateNumEntries);
     ROCKSDB_JSON_SET_PROP(djs, cumu_iter_num);
     ROCKSDB_JSON_SET_PROP(djs, live_iter_num);
     size_t active_num = 0;
@@ -990,6 +994,22 @@ Status CSPPMemTab::ApproximateKeyAnchors
   return Status::OK();
 }
 #endif
+uint64_t CSPPMemTab::ApproximateNumEntries(const Slice& beg_ikey,
+                                           const Slice& end_ikey) {
+  // dfa_approximate_rank may be pretty not accurate because trie may be
+  // highly skewed!
+  if (!m_fac->enableApproximateNumEntries) {
+    return 0;
+  }
+  ROCKSDB_VERIFY_GE(beg_ikey.size(), 8);
+  ROCKSDB_VERIFY_GE(end_ikey.size(), 8);
+  fstring beg_ukey(beg_ikey.data(), beg_ikey.size() - 8);
+  fstring end_ukey(end_ikey.data(), end_ikey.size() - 8);
+  double  beg_rank = m_trie.dfa_approximate_rank(beg_ukey);
+  double  end_rank = m_trie.dfa_approximate_rank(end_ukey);
+  return m_trie.num_words() * fabs(end_rank - beg_rank);
+}
+
 ROCKSDB_REG_Plugin("cspp", CSPPMemTabFactory, MemTableRepFactory);
 ROCKSDB_REG_EasyProxyManip("cspp", CSPPMemTabFactory, MemTableRepFactory);
 ROCKSDB_REG_Plugin("CSPPMemTab", CSPPMemTabFactory, MemTableRepFactory);
@@ -1184,7 +1204,9 @@ public:
     return Status::OK();
   }
   bool IsDeleteRangeSupported() const override { return true; }
-  void Update(const json&, const json& js, const SidePluginRepo&) {}
+  void Update(const json& q, const json& js, const SidePluginRepo& repo) {
+    memtable_factory->Update(q, js, repo);
+  }
   std::string ToString(const json& d, const SidePluginRepo& repo) const {
     json djs = memtable_factory->ToJson(d);
     return JsonToString(djs, d);
@@ -1206,11 +1228,31 @@ public:
   }
   uint64_t ApproximateOffsetOf(ROCKSDB_8_X_COMMA(const ReadOptions&)
                                const Slice& key, TableReaderCaller) final {
-    return 0;
+    // dfa_approximate_rank may be pretty not accurate because trie may be
+    // highly skewed!
+    if (!m_factory->memtable_factory->enableApproximateNumEntries) {
+      return 0;
+    }
+    ROCKSDB_VERIFY_GE(key.size(), 8);
+    fstring user_key(key.data(), key.size() - 8);
+    double rank = m_memtab->m_trie.dfa_approximate_rank(user_key);
+    return rank * file_data_.size_;
   }
   uint64_t ApproximateSize(ROCKSDB_8_X_COMMA(const ReadOptions&)
-                           const Slice&, const Slice&, TableReaderCaller) final {
-    return 0;
+                           const Slice& beg_ik, const Slice& end_ik,
+                           TableReaderCaller) final {
+    // dfa_approximate_rank may be pretty not accurate because trie may be
+    // highly skewed!
+    if (!m_factory->memtable_factory->enableApproximateNumEntries) {
+      return 0;
+    }
+    ROCKSDB_VERIFY_GE(beg_ik.size(), 8);
+    ROCKSDB_VERIFY_GE(end_ik.size(), 8);
+    fstring beg_uk(beg_ik.data(), beg_ik.size() - 8);
+    fstring end_uk(end_ik.data(), end_ik.size() - 8);
+    double  beg_rank = m_memtab->m_trie.dfa_approximate_rank(beg_uk);
+    double  end_rank = m_memtab->m_trie.dfa_approximate_rank(end_uk);
+    return fabs(end_rank - beg_rank) * file_data_.size_;
   }
   size_t ApproximateMemoryUsage() const final { return file_data_.size(); }
   Status Get(const ReadOptions& ro, const Slice& ikey, GetContext* get_context,
