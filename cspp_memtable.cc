@@ -45,6 +45,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   };
 #pragma pack(pop)
   static void encode_pre(Slice d, void* buf) {
+    assert(d.size_ > 0); // empty `d` will not call this function
     char* p = EncodeVarint32((char*)buf, (uint32_t)d.size());
     memcpy(p, d.data_, d.size_);
   }
@@ -199,6 +200,14 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     KeyValueForGet(Slice ikey, void* buf) : KeyValuePair(cp(ikey, buf), Slice()) {}
     void SetTag(uint64_t tag) { memcpy((char*)ikey.end() - 8, &tag, 8); }
   };
+  terark_forceinline Slice GetValue(uint32_t valpos) const {
+    if (valpos) {
+      auto enc_valptr = (const char*)m_trie.mem_get(valpos);
+      return GetLengthPrefixedSlice(enc_valptr);
+    } else {
+      return Slice();
+    }
+  }
   ROCKSDB_FLATTEN
   void Get(const ReadOptions& ro, const LookupKey& k, void* callback_args,
            bool(*callback_func)(void*, const KeyValuePair&)) final {
@@ -219,7 +228,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     KeyValueForGet key_val(ikey, alloca(ikey.size_));
     uint64_t find_tag = DecodeFixed64(ikey.data_ + ikey.size_ - 8);
     intptr_t idx = upper_bound_0(entry, num, find_tag);
-    if (ro.just_check_key_exists) {
+    if (UNLIKELY(ro.just_check_key_exists)) {
       while (idx--) {
         uint64_t tag = entry[idx].tag;
         if ((tag & 255) == kTypeMerge) {
@@ -232,9 +241,8 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       }
     }
     else while (idx--) {
-      auto enc_valptr = (const char*)m_trie.mem_get(entry[idx].pos);
       key_val.SetTag(entry[idx].tag);
-      key_val.value = GetLengthPrefixedSlice(enc_valptr);
+      key_val.value = GetValue(entry[idx].pos);
       if (!callback_func(callback_args, key_val))
         break;
     }
@@ -273,8 +281,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     else while (idx--) {
       uint64_t tag = entry[idx].tag;
       UnPackSequenceAndType(tag, &pikey.sequence, &pikey.type);
-      auto enc_valptr = (const char*)m_trie.mem_get(entry[idx].pos);
-      Slice value = GetLengthPrefixedSlice(enc_valptr);
+      Slice value = GetValue(entry[idx].pos);
       if (!get_context->SaveValue(pikey, value, pinner)) {
         return st;
       }
@@ -290,6 +297,12 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   bool NeedsUserKeyCompareInGet() const final { return false; }
   MemTableRep::Iterator* GetIterator(Arena*) final;
   struct Iter;
+  static size_t EncValueLen(size_t raw_val_len) {
+    if (raw_val_len)
+      return pow2_align_up(VarintLength(raw_val_len) + raw_val_len, Align);
+    else
+      return 0; // does not occupy space
+  }
 };
 bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
   TERARK_ASSERT_EQ(valsize, sizeof(uint32_t));
@@ -298,21 +311,25 @@ bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
   // 2. one memory block can be free'ed partially, we using this feature here
   static_assert(Align == 4); // now it must be 4
   static_assert(sizeof(VecPin) % Align == 0);
-  size_t enc_val_len = pow2_align_up(VarintLength(val_.size()) + val_.size(), Align);
+  size_t enc_val_len = EncValueLen(val_.size());
   size_t vec_pin_pos = trie->mem_alloc(sizeof(VecPin) + sizeof(Entry) + enc_val_len);
   TERARK_VERIFY_NE(vec_pin_pos, MainPatricia::mem_alloc_fail);
   size_t entry_pos = vec_pin_pos + (sizeof(VecPin) / Align);
-  size_t enc_val_pos = vec_pin_pos + ((sizeof(VecPin) + sizeof(Entry)) / Align);
   auto vec_pin = (VecPin*)(trie->mem_get(vec_pin_pos));
   auto entry = (Entry*)(vec_pin + 1);
-  auto enc_val_ptr = (byte_t*)(entry + 1);
   *(uint32_t*)trie_valptr = (uint32_t)vec_pin_pos;
   vec_pin->pos = (uint32_t)entry_pos;
   vec_pin->cap = 1;
   vec_pin->num = 1;
-  entry->pos = (uint32_t)enc_val_pos;
   entry->tag = tag_;
-  encode_pre(val_, enc_val_ptr);
+  if (val_.size_) {
+    auto enc_val_ptr = (byte_t*)(entry + 1);
+    size_t enc_val_pos = vec_pin_pos + ((sizeof(VecPin) + sizeof(Entry)) / Align);
+    entry->pos = (uint32_t)enc_val_pos;
+    encode_pre(val_, enc_val_ptr);
+  } else {
+    entry->pos = 0;
+  }
   return true;
 }
 void CSPPMemTab::Token::destroy_value(void* trie_valptr, size_t valsize) noexcept {
@@ -321,7 +338,7 @@ void CSPPMemTab::Token::destroy_value(void* trie_valptr, size_t valsize) noexcep
   TERARK_ASSERT_EQ(valsize, sizeof(uint32_t));
   auto trie = static_cast<MainPatricia*>(m_trie);
   size_t vec_pin_pos = *(const uint32_t*)trie_valptr;
-  size_t enc_val_len = pow2_align_up(VarintLength(val_.size()) + val_.size(), Align);
+  size_t enc_val_len = EncValueLen(val_.size());
   size_t mem_block_len = sizeof(VecPin) + sizeof(Entry) + enc_val_len;
   trie->mem_free(vec_pin_pos, mem_block_len); // free right now, not lazy free
 }
@@ -358,9 +375,14 @@ bool CSPPMemTab::Token::insert_for_dup_user_key() {
     as_atomic(vec_pin->num).store(num, std::memory_order_release);
     return false; // duplicate internal_key(user_key, tag)
   }
-  size_t enc_val_pos = trie->mem_alloc(VarintLength(val_.size()) + val_.size());
-  TERARK_VERIFY_NE(enc_val_pos, MainPatricia::mem_alloc_fail);
-  encode_pre(val_, trie->mem_get(enc_val_pos));
+  size_t enc_val_pos;
+  if (val_.size_) {
+    enc_val_pos = trie->mem_alloc(VarintLength(val_.size()) + val_.size());
+    TERARK_VERIFY_NE(enc_val_pos, MainPatricia::mem_alloc_fail);
+    encode_pre(val_, trie->mem_get(enc_val_pos));
+  } else {
+    enc_val_pos = 0;
+  }
   if (num < old_cap && last_seq < curr_seq) {
     entry_old[num].pos = (uint32_t)enc_val_pos;
     entry_old[num].tag = tag_;
@@ -432,7 +454,10 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     auto mempool = m_mempool;
     auto entry = (const Entry*)(mempool + Align * m_vec_pin->pos);
     auto enc_val_pos = entry[m_idx].pos;
-    return GetLengthPrefixedSlice(mempool + Align * enc_val_pos);
+    if (enc_val_pos)
+      return GetLengthPrefixedSlice(mempool + Align * enc_val_pos);
+    else
+      return Slice(); // empty
   }
   std::pair<Slice, Slice>
   GetKeyValue() const final { return {key(), value()}; }
