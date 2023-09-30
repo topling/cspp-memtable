@@ -37,6 +37,14 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     uint64_t tag;
     uint32_t pos;
     operator uint64_t() const noexcept { return tag; } // NOLINT
+    Slice GetValue(const void* mempool) const noexcept {
+      if (size_t p = pos) {
+        auto enc_valptr = (const char*)(mempool) + p * Align;
+        return GetLengthPrefixedSlice(enc_valptr);
+      } else {
+        return Slice();
+      }
+    }
   };
   struct VecPin { // once allocated, never realloc
     uint32_t num;
@@ -201,13 +209,8 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     KeyValueForGet(Slice ikey, void* buf) : KeyValuePair(cp(ikey, buf), Slice()) {}
     void SetTag(uint64_t tag) { memcpy((char*)ikey.end() - 8, &tag, 8); }
   };
-  terark_forceinline Slice GetValue(uint32_t valpos) const {
-    if (valpos) {
-      auto enc_valptr = (const char*)m_trie.mem_get(valpos);
-      return GetLengthPrefixedSlice(enc_valptr);
-    } else {
-      return Slice();
-    }
+  terark_forceinline Slice GetValue(const Entry& e) const {
+    return e.GetValue(m_trie.mem_get(0));
   }
   ROCKSDB_FLATTEN
   void Get(const ReadOptions& ro, const LookupKey& k, void* callback_args,
@@ -243,7 +246,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     }
     else while (idx--) {
       key_val.SetTag(entry[idx].tag);
-      key_val.value = GetValue(entry[idx].pos);
+      key_val.value = GetValue(entry[idx]);
       if (!callback_func(callback_args, key_val))
         break;
     }
@@ -282,7 +285,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     else while (idx--) {
       uint64_t tag = entry[idx].tag;
       UnPackSequenceAndType(tag, &pikey.sequence, &pikey.type);
-      Slice value = GetValue(entry[idx].pos);
+      Slice value = GetValue(entry[idx]);
       if (!get_context->SaveValue(pikey, value, pinner)) {
         return st;
       }
@@ -455,11 +458,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     TERARK_ASSERT_GE(m_idx, 0);
     auto mempool = m_mempool;
     auto entry = (const Entry*)(mempool + Align * m_vec_pin->pos);
-    auto enc_val_pos = entry[m_idx].pos;
-    if (enc_val_pos)
-      return GetLengthPrefixedSlice(mempool + Align * enc_val_pos);
-    else
-      return Slice(); // empty
+    return entry[m_idx].GetValue(mempool);
   }
   std::pair<Slice, Slice>
   GetKeyValue() const final { return {key(), value()}; }
