@@ -33,6 +33,23 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   static constexpr size_t Align = MainPatricia::AlignSize;
   static_assert(Align == 4);
 #pragma pack(push, 4)
+  struct KeyValueRecord {
+    uint16_t len_checksum;
+    uint16_t key_len;
+    uint32_t val_len;
+    byte_t kv_data[0];
+  };
+  struct ForeignEntry {
+    uint64_t tag;
+    uint32_t pos;
+    uint32_t fno; // wal file number, normally same in one MemTable
+    operator uint64_t() const noexcept { return tag; } // NOLINT
+    Slice GetValue(const byte_t* base) const noexcept {
+      const size_t WalAlign = 8;
+      auto kv = (const KeyValueRecord*)(base + pos * WalAlign);
+      return Slice(kv->kv_data + kv->key_len, kv->val_len);
+    }
+  };
   struct Entry {
     uint64_t tag;
     uint32_t pos;
@@ -64,6 +81,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   bool          m_rev;
   bool          m_is_flushed = false;
   bool          m_is_empty = true;
+  bool          m_is_foreign_value : 1;
   bool          m_is_sst : 1;
   bool          m_has_converted_to_sst : 1;
   ConvertKind   m_convert_to_sst;
@@ -75,6 +93,9 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
 #if defined(ROCKSDB_UNIT_TEST)
   size_t   m_mem_size = 0;
 #endif
+  uint32_t m_min_fno = 0;
+  uint32_t m_num_files = 0;
+  const byte_t* m_foreign_bases[16] = {}; // all nullptr
   CSPPMemTab(intptr_t cap, bool rev, Logger*, CSPPMemTabFactory*,
              size_t instance_idx, ConvertKind, fstring fpath_or_conf);
   CSPPMemTab(bool rev, Logger*, CSPPMemTabFactory*, size_t instance_idx);
@@ -209,6 +230,12 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     KeyValueForGet(Slice ikey, void* buf) : KeyValuePair(cp(ikey, buf), Slice()) {}
     void SetTag(uint64_t tag) { memcpy((char*)ikey.end() - 8, &tag, 8); }
   };
+  terark_forceinline Slice GetValue(const ForeignEntry& e) const {
+    ROCKSDB_ASSERT_GE(e.fno, m_min_fno);
+    ROCKSDB_ASSERT_LT(e.fno, m_min_fno + m_num_files);
+    auto idx = e.fno - m_min_fno;
+    return e.GetValue(m_foreign_bases[idx]);
+  }
   terark_forceinline Slice GetValue(const Entry& e) const {
     return e.GetValue(m_trie.mem_get(0));
   }
@@ -228,27 +255,33 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     uint32_t vec_pin_pos = m_trie.value_of<uint32_t>(*token);
     auto vec_pin = (VecPin*)m_trie.mem_get(vec_pin_pos);
     size_t num = vec_pin->num & ~LOCK_FLAG;
-    auto entry = (Entry*)m_trie.mem_get(vec_pin->pos);
-    KeyValueForGet key_val(ikey, alloca(ikey.size_));
-    uint64_t find_tag = DecodeFixed64(ikey.data_ + ikey.size_ - 8);
-    intptr_t idx = upper_bound_0(entry, num, find_tag);
-    if (UNLIKELY(ro.just_check_key_exists)) {
-      while (idx--) {
-        uint64_t tag = entry[idx].tag;
-        if ((tag & 255) == kTypeMerge) {
-          // instruct get_context to stop earlier
-          tag = (tag & ~uint64_t(255)) | kTypeValue;
+    auto do_get = [&](auto* entry) {
+      KeyValueForGet key_val(ikey, alloca(ikey.size_));
+      uint64_t find_tag = DecodeFixed64(ikey.data_ + ikey.size_ - 8);
+      intptr_t idx = upper_bound_0(entry, num, find_tag);
+      if (UNLIKELY(ro.just_check_key_exists)) {
+        while (idx--) {
+          uint64_t tag = entry[idx].tag;
+          if ((tag & 255) == kTypeMerge) {
+            // instruct get_context to stop earlier
+            tag = (tag & ~uint64_t(255)) | kTypeValue;
+          }
+          key_val.SetTag(tag);
+          if (!callback_func(callback_args, key_val))
+            break;
         }
-        key_val.SetTag(tag);
+      }
+      else while (idx--) {
+        key_val.SetTag(entry[idx].tag);
+        key_val.value = GetValue(entry[idx]);
         if (!callback_func(callback_args, key_val))
           break;
       }
-    }
-    else while (idx--) {
-      key_val.SetTag(entry[idx].tag);
-      key_val.value = GetValue(entry[idx]);
-      if (!callback_func(callback_args, key_val))
-        break;
+    };
+    if (m_is_foreign_value) {
+      do_get((ForeignEntry*)m_trie.mem_get(vec_pin->pos));
+    } else {
+      do_get((Entry*)m_trie.mem_get(vec_pin->pos));
     }
     m_token_use_idle ? token->idle() : token->release();
   }
@@ -267,28 +300,34 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     uint32_t vec_pin_pos = m_trie.value_of<uint32_t>(token);
     auto vec_pin = (VecPin*)m_trie.mem_get(vec_pin_pos);
     size_t num = vec_pin->num & ~LOCK_FLAG;
-    auto entry = (Entry*)m_trie.mem_get(vec_pin->pos);
-    intptr_t idx = upper_bound_0(entry, num, find_tag);
-    if (ro.just_check_key_exists) {
-      while (idx--) {
+    auto do_get = [&](auto* entry) {
+      intptr_t idx = upper_bound_0(entry, num, find_tag);
+      if (ro.just_check_key_exists) {
+        while (idx--) {
+          uint64_t tag = entry[idx].tag;
+          UnPackSequenceAndType(tag, &pikey.sequence, &pikey.type);
+          if (pikey.type == kTypeMerge) {
+            // instruct get_context to stop earlier
+            pikey.type = kTypeValue;
+          }
+          if (!get_context->SaveValue(pikey, "", pinner)) {
+            break;
+          }
+        }
+      }
+      else while (idx--) {
         uint64_t tag = entry[idx].tag;
         UnPackSequenceAndType(tag, &pikey.sequence, &pikey.type);
-        if (pikey.type == kTypeMerge) {
-          // instruct get_context to stop earlier
-          pikey.type = kTypeValue;
-        }
-        if (!get_context->SaveValue(pikey, "", pinner)) {
+        Slice value = GetValue(entry[idx]);
+        if (!get_context->SaveValue(pikey, value, pinner)) {
           break;
         }
       }
-    }
-    else while (idx--) {
-      uint64_t tag = entry[idx].tag;
-      UnPackSequenceAndType(tag, &pikey.sequence, &pikey.type);
-      Slice value = GetValue(entry[idx]);
-      if (!get_context->SaveValue(pikey, value, pinner)) {
-        break;
-      }
+    };
+    if (m_is_foreign_value) {
+      do_get((ForeignEntry*)m_trie.mem_get(vec_pin->pos));
+    } else {
+      do_get((Entry*)m_trie.mem_get(vec_pin->pos));
     }
     return st;
   }
@@ -424,6 +463,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   const VecPin* m_vec_pin = nullptr; // used for speed up memory access
   int         m_idx = -1;
   bool        m_rev;
+  bool        m_is_foreign_value;
   struct EntryVec { int num; const Entry* vec; };
   terark_forceinline EntryVec GetEntryVec() {
     assert(m_iter->has_value());
@@ -457,8 +497,13 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   Slice value() const final {
     TERARK_ASSERT_GE(m_idx, 0);
     auto mempool = m_mempool;
-    auto entry = (const Entry*)(mempool + Align * m_vec_pin->pos);
-    return entry[m_idx].GetValue(mempool);
+    if (m_is_foreign_value) {
+      auto entry = (const ForeignEntry*)(mempool + Align * m_vec_pin->pos);
+      return m_tab->GetValue(entry[m_idx]);
+    } else {
+      auto entry = (const Entry*)(mempool + Align * m_vec_pin->pos);
+      return entry[m_idx].GetValue(mempool);
+    }
   }
   std::pair<Slice, Slice>
   GetKeyValue() const final { return {key(), value()}; }
@@ -830,6 +875,7 @@ MemTableRep::Iterator* CSPPMemTab::GetIterator(Arena* a) {
 CSPPMemTab::Iter::Iter(CSPPMemTab* tab) {
   m_tab = tab;
   m_rev = tab->m_rev;
+  m_is_foreign_value = tab->m_is_foreign_value;
   m_iter = nullptr;
   m_mempool = (const char*)tab->m_trie.mem_get(0);
 }
@@ -865,6 +911,7 @@ inline void CSPPMemTab::init(bool rev, Logger* log, CSPPMemTabFactory* f) {
   m_fac = f;
   m_log = log;
   m_rev = rev;
+  m_is_foreign_value = false;
   m_has_converted_to_sst = false;
   m_read_by_writer_token = f->read_by_writer_token;
   m_token_use_idle = f->token_use_idle;
