@@ -278,7 +278,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
           pikey.type = kTypeValue;
         }
         if (!get_context->SaveValue(pikey, "", pinner)) {
-          return st;
+          break;
         }
       }
     }
@@ -287,7 +287,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       UnPackSequenceAndType(tag, &pikey.sequence, &pikey.type);
       Slice value = GetValue(entry[idx]);
       if (!get_context->SaveValue(pikey, value, pinner)) {
-        return st;
+        break;
       }
     }
     return st;
