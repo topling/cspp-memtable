@@ -625,7 +625,7 @@ void JS_CSPPMemTab_AddVersion(json& djs, bool html) {
 }
 ROCKSDB_ENUM_CLASS(HugePageEnum, uint8_t, kNone = 0, kMmap = 1, kTransparent = 2);
 struct CSPPMemTabFactory final : public MemTableRepFactory {
-  intptr_t m_mem_cap = 2LL << 30;
+  size_t m_mem_cap = 2LL << 30;
   bool   use_vm = true;
   HugePageEnum  use_hugepage = HugePageEnum::kNone;
   bool   vm_explicit_commit = false;
