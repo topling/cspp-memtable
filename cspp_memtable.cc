@@ -629,6 +629,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   bool   use_vm = true;
   HugePageEnum  use_hugepage = HugePageEnum::kNone;
   bool   vm_explicit_commit = false;
+  bool   vm_background_commit = false; // true almost always makes slow
   bool   read_by_writer_token = true;
   bool   token_use_idle = true;
   bool   accurate_memsize = false; // mainly for debug and unit test
@@ -648,14 +649,15 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator& cmp,
                                  Allocator* a, const SliceTransform* s,
                                  Logger* logger) final {
-    return CreateMemTableRep(std::string(), cmp, a, s, logger, 0);
+    return CreateMemTableRep("", MutableCFOptions(), cmp, a, s, logger, 0);
   }
   MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator& cmp,
                                  Allocator* a, const SliceTransform* s,
                                  Logger* logger, uint32_t cf_id) final {
-    return CreateMemTableRep(std::string(), cmp, a, s, logger, cf_id);
+    return CreateMemTableRep("", MutableCFOptions(), cmp, a, s, logger, cf_id);
   }
   MemTableRep* CreateMemTableRep(const std::string& level0_dir,
+                                 const MutableCFOptions& mcfopt,
                                  const MemTableRep::KeyComparator& cmp,
                                  Allocator*, const SliceTransform*,
                                  Logger* logger, uint32_t cf_id) final {
@@ -677,8 +679,44 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
       if (vm_explicit_commit)
         conf|"&vm_explicit_commit=true"; // default is false
     }
-    return new CSPPMemTab(m_mem_cap, uc->IsReverseBytewise(), logger,
-                          this, curr_num, curr_convert_to_sst, conf);
+    // config param mem_cap is required, DONT delete it!
+    // because write_buffer_size can be changed dynamically, if it is changed
+    // larger, and existing CSPPMemTab was created with
+    //             mem_cap = old write_bufer_size * 2
+    // which is smaller than new write_bufer_size, that CSPPMemTab will be
+    // add data size with respect to new write_bufer_size, thus cause memory
+    // alloc in CSPP trie failed.
+    auto require = std::min({mcfopt.write_buffer_size * 2,
+                             mcfopt.write_buffer_size + (1ul << 30),
+                             size_t(16) << 30});
+    auto mem_cap = std::max(m_mem_cap, require);
+    auto tab = new CSPPMemTab(mem_cap, uc->IsReverseBytewise(), logger,
+                              this, curr_num, curr_convert_to_sst, conf);
+    auto len = std::min(mcfopt.write_buffer_size, tab->m_trie.mem_capacity());
+    extern bool IsRocksBackgroundThread(); // defined in util/threadpool_impl.cc
+    if (ConvertKind::kFileMmap == curr_convert_to_sst && len >= 4096 &&
+                vm_background_commit && IsRocksBackgroundThread()) {
+      // this is almost always slow, may be NUMA, if not populate write all
+      // memory, os will populate it as needed, thus the memory will almost
+      // always allocated on/near working CPUs, for NUMA, this is more friedly
+    #ifdef __linux__
+      if (g_linux_kernel_version >= KERNEL_VERSION(5,14,0)) {
+        auto populate_write = 23; // MADV_POPULATE_WRITE = 23
+        auto mem = tab->m_trie.get_mmap();
+        auto t0 = std::chrono::steady_clock::now();
+        if (madvise((void*)mem.p, len, populate_write) < 0) {
+          ROCKS_LOG_WARN(logger, "MADV_POPULATE_WRITE(%s, %zd) = %m",
+                         tab->m_trie.mmap_fpath().c_str(), len);
+        }
+        auto t1 = std::chrono::steady_clock::now();
+        using namespace std::chrono;
+        ROCKS_LOG_DEBUG(logger, "MADV_POPULATE_WRITE(%s, %zd) = %.6f ms",
+                        tab->m_trie.mmap_fpath().c_str(), len,
+                        duration_cast<nanoseconds>(t1-t0).count()/1e6);
+      }
+    #endif
+    }
+    return tab;
   }
   const char *Name() const final { return "CSPPMemTabFactory"; }
   bool IsInsertConcurrentlySupported() const final { return true; }
@@ -701,6 +739,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
       }
     }
     ROCKSDB_JSON_OPT_PROP(js, vm_explicit_commit);
+    ROCKSDB_JSON_OPT_PROP(js, vm_background_commit);
     ROCKSDB_JSON_OPT_PROP(js, read_by_writer_token);
     ROCKSDB_JSON_OPT_PROP(js, token_use_idle);
     ROCKSDB_JSON_OPT_PROP(js, accurate_memsize);
@@ -740,6 +779,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_PROP(djs, use_vm);
     ROCKSDB_JSON_SET_ENUM(djs, use_hugepage);
     ROCKSDB_JSON_SET_PROP(djs, vm_explicit_commit);
+    ROCKSDB_JSON_SET_PROP(djs, vm_background_commit);
     ROCKSDB_JSON_SET_PROP(djs, read_by_writer_token);
     ROCKSDB_JSON_SET_PROP(djs, token_use_idle);
     ROCKSDB_JSON_SET_PROP(djs, accurate_memsize);
