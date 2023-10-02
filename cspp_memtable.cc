@@ -624,6 +624,7 @@ void JS_CSPPMemTab_AddVersion(json& djs, bool html) {
   }
 }
 ROCKSDB_ENUM_CLASS(HugePageEnum, uint8_t, kNone = 0, kMmap = 1, kTransparent = 2);
+constexpr size_t huge_2m = 2 << 20;
 struct CSPPMemTabFactory final : public MemTableRepFactory {
   size_t m_mem_cap = 2LL << 30;
   bool   use_vm = true;
@@ -636,7 +637,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   bool   sync_sst_file = true;
   bool   enableApproximateNumEntries = false; // may be pretty not accurate
   ConvertKind convert_to_sst = ConvertKind::kDontConvert;
-  size_t chunk_size = 2 << 20; // 2MiB
+  size_t chunk_size = huge_2m;
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
   uint64_t deactived_mem_sum = 0;
@@ -665,19 +666,24 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     if (!uc->IsBytewise()) {
       return nullptr;
     }
-    auto curr_convert_to_sst = convert_to_sst; // may be updated by webview
+    // may be updated by webview
+    auto curr_chunk_size = this->chunk_size;
+    auto curr_use_hugepage = this->use_hugepage;
+    auto curr_convert_to_sst = this->convert_to_sst;
     auto curr_num = as_atomic(cumu_num).fetch_add(1, std::memory_order_relaxed);
     terark::string_appender<> conf;
     conf.reserve(512);
-    conf|"?chunk_size="|chunk_size;
+    conf|"?chunk_size="|curr_chunk_size;
     if (ConvertKind::kFileMmap == curr_convert_to_sst) {
       // File mmap does not support hugepage
       conf|"&file_path="|level0_dir;
       conf^"/cspp-%06zd.memtab"^curr_num^"-"^cf_id;
     } else {
-      conf|"&hugepage="|int(use_hugepage);
-      if (vm_explicit_commit)
-        conf|"&vm_explicit_commit=true"; // default is false
+      conf|"&hugepage="|int(curr_use_hugepage);
+      if (HugePageEnum::kNone == curr_use_hugepage || huge_2m == curr_chunk_size) {
+        if (vm_explicit_commit)
+          conf|"&vm_explicit_commit=true"; // default is false
+      }
     }
     // config param mem_cap is required, DONT delete it!
     // because write_buffer_size can be changed dynamically, if it is changed
@@ -947,6 +953,10 @@ void CSPPMemTab::MarkReadOnly() {
   m_trie.set_readonly();
 }
 void CSPPMemTab::MarkFlushed() {
+  if (auto& mp = m_trie.risk_get_mempool_mwmr(); mp.m_vm_commit_fail_cnt) {
+    ROCKS_LOG_WARN(m_log, "cspp-%06zd: vm_commit_fail: cnt = %zd, len = %zd",
+        m_instance_idx, mp.m_vm_commit_fail_cnt, mp.m_vm_commit_fail_len);
+  }
   ROCKSDB_VERIFY(m_trie.is_readonly());
   ColdizeMemory("CSPPMemTab::MarkFlushed");
   m_is_flushed = true;
