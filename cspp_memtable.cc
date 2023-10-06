@@ -125,9 +125,10 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     return InsertKeyValueWithHintConcurrently(k, v, hint);
   }
   void FinishHint(void* hint) final {
-    assert(nullptr != hint);
-    auto token = (Token*)hint;
-    m_token_use_idle ? token->idle() : token->release();
+    if (nullptr != hint) {
+      auto token = (Token*)hint;
+      m_token_use_idle ? token->idle() : token->release();
+    }
   }
   inline Patricia::TokenBase* reader_token() const {
     if (m_read_by_writer_token)
