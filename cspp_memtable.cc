@@ -23,6 +23,7 @@
 const char* git_version_hash_info_cspp_memtable();
 namespace ROCKSDB_NAMESPACE {
 using namespace terark;
+extern bool IsRocksBackgroundThread(); // defined in util/threadpool_impl.cc
 ROCKSDB_ENUM_CLASS(ConvertKind, uint08_t, kDontConvert, kDumpMem, kFileMmap);
 static const uint32_t LOCK_FLAG = uint32_t(1) << 31;
 struct CSPPMemTabFactory;
@@ -700,7 +701,6 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     auto tab = new CSPPMemTab(mem_cap, uc->IsReverseBytewise(), logger,
                               this, curr_num, curr_convert_to_sst, conf);
     auto len = std::min(mcfopt.write_buffer_size, tab->m_trie.mem_capacity());
-    extern bool IsRocksBackgroundThread(); // defined in util/threadpool_impl.cc
     if (ConvertKind::kFileMmap == curr_convert_to_sst && len >= 4096 &&
                 vm_background_commit && IsRocksBackgroundThread()) {
       // this is almost always slow, may be NUMA, if not populate write all
@@ -951,9 +951,23 @@ CSPPMemTab::~CSPPMemTab() noexcept {
 void CSPPMemTab::MarkReadOnly() {
   auto used = m_trie.mem_size_inline();
   as_atomic(m_fac->deactived_mem_sum).fetch_add(used, std::memory_order_relaxed);
-  m_trie.set_readonly();
+  if (ConvertKind::kFileMmap == m_convert_to_sst && !IsRocksBackgroundThread()) {
+    // m_trie.set_readonly() may time consuming, do not run in foreground
+  } else {
+    auto clock = Env::Default()->GetSystemClock();
+    double t0 = clock->NowNanos();
+    m_trie.set_readonly();
+    double tt1 = clock->NowNanos();
+    ROCKS_LOG_INFO(m_log,
+     "CSPPMemTab::MarkReadOnly(%s): set_readonly(), mem_size = %8.3f M, time = %8.3f us",
+      m_trie.mmap_fpath().c_str(), m_trie.mem_size_inline()/double(1<<20), (tt1-t0)/1e3);
+  }
 }
 void CSPPMemTab::MarkFlushed() {
+  if (!m_trie.is_readonly()) {
+    ROCKSDB_VERIFY_EQ(m_convert_to_sst, ConvertKind::kDontConvert);
+    m_trie.set_readonly();
+  }
   if (auto& mp = m_trie.risk_get_mempool_mwmr(); mp.m_vm_commit_fail_cnt) {
     ROCKS_LOG_WARN(m_log, "cspp-%06zd: vm_commit_fail: cnt = %zd, len = %zd",
         m_instance_idx, mp.m_vm_commit_fail_cnt, mp.m_vm_commit_fail_len);
@@ -1126,7 +1140,6 @@ try {
   auto& ioptions = tbo.ioptions;
   auto* clock = ioptions.clock;
   auto* fs = ioptions.fs.get();
-  double t0 = clock->NowMicros();
   ROCKSDB_VERIFY_NE(m_convert_to_sst, ConvertKind::kDontConvert);
   bool sync_sst_file = m_fac->sync_sst_file; // consitency param snapshot
   IODebugContext dbg_ctx;
@@ -1135,8 +1148,17 @@ try {
   std::string fname = TableFileName(tbo.ioptions.cf_paths,
                                     meta->fd.GetNumber(),
                                     meta->fd.GetPathId());
+  if (!m_trie.is_readonly()) {
+    double tt0 = clock->NowNanos();
+    m_trie.set_readonly();
+    double tt1 = clock->NowNanos();
+    ROCKS_LOG_INFO(m_log,
+     "CSPPMemTab::ConvertToSST(%s): set_readonly(), mem_size = %8.3f M, time = %8.3f us",
+      fname.c_str(), m_trie.mem_size_inline()/double(1<<20), (tt1-tt0)/1e3);
+  }
   std::unique_ptr<FSWritableFile> fs_file;
   const bool is_file_mmap = ConvertKind::kFileMmap == m_convert_to_sst;
+  double t0 = clock->NowMicros();
   if (is_file_mmap) {
     const std::string& src_fname = m_trie.mmap_fpath();
     IOStatus ios = fs->RenameFile(src_fname, fname, fopt.io_options, &dbg_ctx);
