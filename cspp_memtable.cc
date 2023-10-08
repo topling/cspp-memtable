@@ -21,6 +21,10 @@
 #endif
 
 const char* git_version_hash_info_cspp_memtable();
+namespace terark {
+extern void CSPP_SetDebugLevel(long level); // defined in cspptrie.cpp
+extern long CSPP_GetDebugLevel();           // defined in cspptrie.cpp
+} // namespace terark
 namespace ROCKSDB_NAMESPACE {
 using namespace terark;
 extern bool IsRocksBackgroundThread(); // defined in util/threadpool_impl.cc
@@ -764,6 +768,19 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
       chunk_size = 1024;
      #endif
     }
+    { // cspp global conf
+      if (js.contains("cspp_debug_level")) {
+        if (js["cspp_debug_level"].is_string()) {
+          InfoLogLevel cspp_debug_level = InfoLogLevel::ERROR_LEVEL;
+          ROCKSDB_JSON_OPT_ENUM(js, cspp_debug_level);
+          CSPP_SetDebugLevel(3 - cspp_debug_level);
+        } else {
+          long cspp_debug_level = 0; // ERROR_LEVEL
+          ROCKSDB_JSON_OPT_PROP(js, cspp_debug_level);
+          CSPP_SetDebugLevel(cspp_debug_level);
+        }
+      }
+    }
     m_mem_cap = mem_cap;
   }
   std::string ToString(const json& d, const SidePluginRepo&) const {
@@ -793,6 +810,16 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_ENUM(djs, convert_to_sst);
     ROCKSDB_JSON_SET_PROP(djs, sync_sst_file);
     ROCKSDB_JSON_SET_PROP(djs, enableApproximateNumEntries);
+    { // cspp global conf
+      long val = CSPP_GetDebugLevel();
+      if (val >= 0 && val <= 3) {
+        auto cspp_debug_level = InfoLogLevel(3 - val);
+        ROCKSDB_JSON_SET_ENUM(djs, cspp_debug_level);
+      } else {
+        auto cspp_debug_level = val;
+        ROCKSDB_JSON_SET_PROP(djs, cspp_debug_level);
+      }
+    }
     ROCKSDB_JSON_SET_PROP(djs, cumu_iter_num);
     ROCKSDB_JSON_SET_PROP(djs, live_iter_num);
     size_t active_num = 0;
