@@ -959,7 +959,7 @@ void CSPPMemTab::MarkReadOnly() {
     m_trie.set_readonly();
     double tt1 = clock->NowNanos();
     ROCKS_LOG_INFO(m_log,
-     "CSPPMemTab::MarkReadOnly(%s): set_readonly(), mem_size = %8.3f M, time = %8.3f us",
+     "CSPPMemTab::MarkReadOnly(%s): set_readonly(), mem_size = %8.3f M, time = %9.3f us",
       m_trie.mmap_fpath().c_str(), m_trie.mem_size_inline()/double(1<<20), (tt1-t0)/1e3);
   }
 }
@@ -1153,7 +1153,7 @@ try {
     m_trie.set_readonly();
     double tt1 = clock->NowNanos();
     ROCKS_LOG_INFO(m_log,
-     "CSPPMemTab::ConvertToSST(%s): set_readonly(), mem_size = %8.3f M, time = %8.3f us",
+     "CSPPMemTab::ConvertToSST(%s): set_readonly(), mem_size = %8.3f M, time = %9.3f us",
       fname.c_str(), m_trie.mem_size_inline()/double(1<<20), (tt1-tt0)/1e3);
   }
   std::unique_ptr<FSWritableFile> fs_file;
