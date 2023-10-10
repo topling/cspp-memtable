@@ -75,6 +75,8 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   CSPPMemTabFactory* m_fac;
   Logger*  m_log;
   size_t   m_instance_idx;
+  size_t   max_dup_len = 1;
+  size_t   num_dup_user_keys = 0;
   uint32_t m_cumu_iter_num = 0;
   uint32_t m_live_iter_num = 0;
 #if defined(ROCKSDB_UNIT_TEST)
@@ -90,6 +92,10 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   struct Token : public Patricia::WriterToken {
     uint64_t tag_ = UINT64_MAX;
     Slice val_;
+    size_t max_dup_len = 1;
+    size_t num_dup_user_keys = 0;
+    ~Token() { sync_to_memtab(); }
+    void sync_to_memtab();
     bool init_value(void* trie_valptr, size_t trie_valsize) noexcept final;
     void destroy_value(void* valptr, size_t valsize) noexcept final;
     bool insert_for_dup_user_key();
@@ -157,6 +163,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     m_token_use_idle ? token->idle() : token->release();
     return ret;
   }
+  void ConvertToReadOnly(const char* caller, fstring sst_name);
   void MarkReadOnly() final;
   void MarkFlushed() final;
   void ColdizeMemory(const char* func);
@@ -313,6 +320,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     else
       return 0; // does not occupy space
   }
+  void ToWebViewJson(json&, const json& dump_options) const;
 };
 bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
   TERARK_ASSERT_EQ(valsize, sizeof(uint32_t));
@@ -394,12 +402,16 @@ bool CSPPMemTab::Token::insert_for_dup_user_key() {
   } else {
     enc_val_pos = 0;
   }
+  maximize(max_dup_len, num + 1);
   if (num < old_cap && last_seq < curr_seq) {
     entry_old[num].pos = (uint32_t)enc_val_pos;
     entry_old[num].tag = tag_;
     // this atomic store also clears LOCK_FLAG
     as_atomic(vec_pin->num).store(num + 1, std::memory_order_release);
     return true;
+  }
+  if (1 == num) {
+    num_dup_user_keys++;
   }
   uint32_t new_cap = num == old_cap ? old_cap * 2 : old_cap;
   size_t entry_cow_pos = trie->mem_alloc(sizeof(Entry) * new_cap);
@@ -647,6 +659,8 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   size_t chunk_size = huge_2m;
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
+  size_t max_dup_len = 1;
+  size_t num_dup_user_keys = 0;
   uint64_t deactived_mem_sum = 0;
   MemTabLinkListNode m_head;
   mutable std::mutex m_mtx;
@@ -821,6 +835,8 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
         ROCKSDB_JSON_SET_PROP(djs, cspp_debug_level);
       }
     }
+    ROCKSDB_JSON_SET_PROP(djs, max_dup_len);
+    ROCKSDB_JSON_SET_PROP(djs, num_dup_user_keys);
     ROCKSDB_JSON_SET_PROP(djs, cumu_iter_num);
     ROCKSDB_JSON_SET_PROP(djs, live_iter_num);
     size_t active_num = 0;
@@ -976,25 +992,58 @@ CSPPMemTab::~CSPPMemTab() noexcept {
     }
   }
 }
+void CSPPMemTab::Token::sync_to_memtab() {
+  if (num_dup_user_keys) {
+    auto trie = (MainPatricia*)(m_trie);
+    auto mtab = (CSPPMemTab*)((char*)(trie) - offsetof(CSPPMemTab, m_trie));
+    atomic_maximize(mtab->max_dup_len, max_dup_len, std::memory_order_relaxed);
+    as_atomic(mtab->num_dup_user_keys)
+        .fetch_add(num_dup_user_keys, std::memory_order_relaxed);
+    num_dup_user_keys = 0; // notify sync'ed
+  }
+}
+void CSPPMemTab::ConvertToReadOnly(const char* caller, fstring sst_name) {
+  TERARK_VERIFY(!m_trie.is_readonly());
+  auto clock = Env::Default()->GetSystemClock();
+  double t0 = clock->NowNanos();
+  m_trie.for_each_tls_token([&,this](Patricia::TokenBase* tok) {
+    if (auto wtok = dynamic_cast<Token*>(tok)) {
+      if (wtok->num_dup_user_keys) {
+        // not need atomic
+        maximize(this->max_dup_len, wtok->max_dup_len);
+        this->num_dup_user_keys += wtok->num_dup_user_keys;
+        wtok->num_dup_user_keys = 0;
+      }
+    }
+  });
+  if (m_trie.is_mmap()) {
+    auto header = (DFA_MmapHeader*)(m_trie.get_mmap().data());
+    header->reserve1[0] = max_dup_len; // persistent to mmap
+    header->reserve1[1] = num_dup_user_keys;
+  }
+  atomic_maximize(m_fac->max_dup_len, max_dup_len, std::memory_order_relaxed);
+  as_atomic(m_fac->num_dup_user_keys)
+        .fetch_add(num_dup_user_keys, std::memory_order_relaxed);
+  m_trie.set_readonly(); // set readonly is the last step
+  double tt1 = clock->NowNanos();
+  ROCKS_LOG_INFO(m_log,
+    "%s ConvertToReadOnly %s in %s, mem_size = %8.3f M, time = %9.3f us",
+    m_trie.mmap_fpath().c_str(), sst_name.c_str(), caller,
+    m_trie.mem_size_inline()/double(1<<20), (tt1-t0)/1e3);
+}
 void CSPPMemTab::MarkReadOnly() {
   auto used = m_trie.mem_size_inline();
   as_atomic(m_fac->deactived_mem_sum).fetch_add(used, std::memory_order_relaxed);
   if (ConvertKind::kFileMmap == m_convert_to_sst && !IsRocksBackgroundThread()) {
     // m_trie.set_readonly() may time consuming, do not run in foreground
   } else {
-    auto clock = Env::Default()->GetSystemClock();
-    double t0 = clock->NowNanos();
-    m_trie.set_readonly();
-    double tt1 = clock->NowNanos();
-    ROCKS_LOG_INFO(m_log,
-     "CSPPMemTab::MarkReadOnly(%s): set_readonly(), mem_size = %8.3f M, time = %9.3f us",
-      m_trie.mmap_fpath().c_str(), m_trie.mem_size_inline()/double(1<<20), (tt1-t0)/1e3);
+    ConvertToReadOnly("MarkReadOnly", m_trie.mmap_fpath());
   }
 }
 void CSPPMemTab::MarkFlushed() {
   if (!m_trie.is_readonly()) {
     ROCKSDB_VERIFY_EQ(m_convert_to_sst, ConvertKind::kDontConvert);
-    m_trie.set_readonly();
+    ConvertToReadOnly("MarkFlushed", m_trie.mmap_fpath());
   }
   if (auto& mp = m_trie.risk_get_mempool_mwmr(); mp.m_vm_commit_fail_cnt) {
     ROCKS_LOG_WARN(m_log, "cspp-%06zd: vm_commit_fail: cnt = %zd, len = %zd",
@@ -1177,12 +1226,7 @@ try {
                                     meta->fd.GetNumber(),
                                     meta->fd.GetPathId());
   if (!m_trie.is_readonly()) {
-    double tt0 = clock->NowNanos();
-    m_trie.set_readonly();
-    double tt1 = clock->NowNanos();
-    ROCKS_LOG_INFO(m_log,
-     "CSPPMemTab::ConvertToSST(%s): set_readonly(), mem_size = %8.3f M, time = %9.3f us",
-      fname.c_str(), m_trie.mem_size_inline()/double(1<<20), (tt1-tt0)/1e3);
+    ConvertToReadOnly("ConvertToSST", fname);
   }
   std::unique_ptr<FSWritableFile> fs_file;
   const bool is_file_mmap = ConvertKind::kFileMmap == m_convert_to_sst;
@@ -1394,6 +1438,14 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
   m_memtab->m_trie.self_mmap_user_mem(file_data);
   as_atomic(memtab_fac->deactived_mem_sum)
            .fetch_add(file_data.size(), std::memory_order_relaxed);
+  auto header = (DFA_MmapHeader*)(file_data.data());
+  m_memtab->max_dup_len = header->reserve1[0];
+  m_memtab->num_dup_user_keys = header->reserve1[1];
+  atomic_maximize(memtab_fac->max_dup_len,
+                    m_memtab->max_dup_len, std::memory_order_relaxed);
+  as_atomic(memtab_fac->num_dup_user_keys)
+   .fetch_add(m_memtab->num_dup_user_keys, std::memory_order_relaxed);
+
   table_properties_->compression_name = "CSPPMemTab";
   table_properties_->compression_options.clear();
   as_string_appender(table_properties_->compression_options)
@@ -1418,9 +1470,20 @@ CSPPMemTabTableReader::~CSPPMemTabTableReader() {
 std::string
 CSPPMemTabTableReader::ToWebViewString(const json& dump_options) const {
   json djs;
-  djs["num_user_keys"] = m_memtab->m_trie.num_words();
   djs["num_entries"] = table_properties_->num_entries;
+  djs["num_deletions"] = table_properties_->num_deletions;
+  djs["num_merge_operands"] = table_properties_->num_merge_operands;
+  djs["num_range_deletions"] = table_properties_->num_range_deletions;
+  m_memtab->ToWebViewJson(djs, dump_options);
   return JsonToString(djs, dump_options);
+}
+void CSPPMemTab::ToWebViewJson(json& djs, const json& dump_options) const {
+  const auto& fac = *m_fac;
+  djs["num_user_keys"] = m_trie.num_words();
+  ROCKSDB_JSON_SET_PROP(djs, max_dup_len);
+  ROCKSDB_JSON_SET_PROP(djs, num_dup_user_keys);
+  ROCKSDB_JSON_SET_PROP(djs, fac.max_dup_len);
+  ROCKSDB_JSON_SET_PROP(djs, fac.num_dup_user_keys);
 }
 Status CSPPMemTabTableFactory::NewTableReader(
               const ReadOptions& ro,
