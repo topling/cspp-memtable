@@ -385,6 +385,7 @@ bool CSPPMemTab::Token::insert_for_dup_user_key() {
     as_atomic(vec_pin->num).store(num, std::memory_order_release);
     return false; // duplicate internal_key(user_key, tag)
   }
+  trie->mem_gc(this); // on many dup, gc is needed to revoke lazy free'ed mem
   size_t enc_val_pos;
   if (val_.size_) {
     enc_val_pos = trie->mem_alloc(VarintLength(val_.size()) + val_.size());
@@ -420,7 +421,7 @@ bool CSPPMemTab::Token::insert_for_dup_user_key() {
   // this memory_order_release makes all previous write visiable to other CPUs
   // vec_pin->num.store also clears LOCK_FLAG
   as_atomic(vec_pin->num).store(num + 1, std::memory_order_release);
-  trie->mem_lazy_free(entry_old_pos, sizeof(Entry) * num);
+  trie->mem_lazy_free(entry_old_pos, sizeof(Entry) * num, this);
   return true;
 }
 struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
@@ -1416,9 +1417,10 @@ CSPPMemTabTableReader::~CSPPMemTabTableReader() {
 }
 std::string
 CSPPMemTabTableReader::ToWebViewString(const json& dump_options) const {
-  std::string str;
-  str = "TODO";
-  return str;
+  json djs;
+  djs["num_user_keys"] = m_memtab->m_trie.num_words();
+  djs["num_entries"] = table_properties_->num_entries;
+  return JsonToString(djs, dump_options);
 }
 Status CSPPMemTabTableFactory::NewTableReader(
               const ReadOptions& ro,
