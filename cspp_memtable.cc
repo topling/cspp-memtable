@@ -1037,13 +1037,13 @@ void CSPPMemTab::MarkReadOnly() {
   if (ConvertKind::kFileMmap == m_convert_to_sst && !IsRocksBackgroundThread()) {
     // m_trie.set_readonly() may time consuming, do not run in foreground
   } else {
-    ConvertToReadOnly("MarkReadOnly", m_trie.mmap_fpath());
+    ConvertToReadOnly("MarkReadOnly", ""); // sst_name is unknow
   }
 }
 void CSPPMemTab::MarkFlushed() {
   if (!m_trie.is_readonly()) {
     ROCKSDB_VERIFY_EQ(m_convert_to_sst, ConvertKind::kDontConvert);
-    ConvertToReadOnly("MarkFlushed", m_trie.mmap_fpath());
+    ConvertToReadOnly("MarkFlushed", ""); // sst_name is unknow
   }
   if (auto& mp = m_trie.risk_get_mempool_mwmr(); mp.m_vm_commit_fail_cnt) {
     ROCKS_LOG_WARN(m_log, "cspp-%06zd: vm_commit_fail: cnt = %zd, len = %zd",
