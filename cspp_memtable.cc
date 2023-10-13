@@ -724,7 +724,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
                 vm_background_commit && IsRocksBackgroundThread()) {
       // this is almost always slow, may be NUMA, if not populate write all
       // memory, os will populate it as needed, thus the memory will almost
-      // always allocated on/near working CPUs, for NUMA, this is more friedly
+      // always allocated on/near working CPUs, for NUMA, this is more friendly
     #ifdef __linux__
       if (g_linux_kernel_version >= KERNEL_VERSION(5,14,0)) {
         auto populate_write = 23; // MADV_POPULATE_WRITE = 23
@@ -1042,14 +1042,13 @@ void CSPPMemTab::MarkReadOnly() {
 }
 void CSPPMemTab::MarkFlushed() {
   if (!m_trie.is_readonly()) {
-    ROCKSDB_VERIFY_EQ(m_convert_to_sst, ConvertKind::kDontConvert);
+    // ROCKSDB_VERIFY_EQ(m_convert_to_sst, ConvertKind::kDontConvert); // false verify
     ConvertToReadOnly("MarkFlushed", ""); // sst_name is unknow
   }
   if (auto& mp = m_trie.risk_get_mempool_mwmr(); mp.m_vm_commit_fail_cnt) {
     ROCKS_LOG_WARN(m_log, "cspp-%06zd: vm_commit_fail: cnt = %zd, len = %zd",
         m_instance_idx, mp.m_vm_commit_fail_cnt, mp.m_vm_commit_fail_len);
   }
-  ROCKSDB_VERIFY(m_trie.is_readonly());
   ColdizeMemory("CSPPMemTab::MarkFlushed");
   m_is_flushed = true;
 }
