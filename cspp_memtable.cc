@@ -94,8 +94,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     Slice val_;
     size_t max_dup_len = 1;
     size_t num_dup_user_keys = 0;
-    ~Token() { sync_to_memtab(); }
-    void sync_to_memtab();
+    ~Token();
     bool init_value(void* trie_valptr, size_t trie_valsize) noexcept final;
     void destroy_value(void* valptr, size_t valsize) noexcept final;
     bool insert_for_dup_user_key();
@@ -992,7 +991,8 @@ CSPPMemTab::~CSPPMemTab() noexcept {
     }
   }
 }
-void CSPPMemTab::Token::sync_to_memtab() {
+CSPPMemTab::Token::~Token() {
+  // sync Token stats to MemTab
   if (num_dup_user_keys) {
     auto trie = (MainPatricia*)(m_trie);
     auto mtab = (CSPPMemTab*)((char*)(trie) - offsetof(CSPPMemTab, m_trie));
