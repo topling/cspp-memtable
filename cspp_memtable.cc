@@ -649,6 +649,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   HugePageEnum  use_hugepage = HugePageEnum::kNone;
   bool   vm_explicit_commit = false;
   bool   vm_background_commit = false; // true almost always makes slow
+  bool   vm_coldize_on_flush = false;
   bool   read_by_writer_token = true;
   bool   token_use_idle = true;
   bool   accurate_memsize = false; // mainly for debug and unit test
@@ -765,6 +766,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     }
     ROCKSDB_JSON_OPT_PROP(js, vm_explicit_commit);
     ROCKSDB_JSON_OPT_PROP(js, vm_background_commit);
+    ROCKSDB_JSON_OPT_PROP(js, vm_coldize_on_flush);
     ROCKSDB_JSON_OPT_PROP(js, read_by_writer_token);
     ROCKSDB_JSON_OPT_PROP(js, token_use_idle);
     ROCKSDB_JSON_OPT_PROP(js, accurate_memsize);
@@ -818,6 +820,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_ENUM(djs, use_hugepage);
     ROCKSDB_JSON_SET_PROP(djs, vm_explicit_commit);
     ROCKSDB_JSON_SET_PROP(djs, vm_background_commit);
+    ROCKSDB_JSON_SET_PROP(djs, vm_coldize_on_flush);
     ROCKSDB_JSON_SET_PROP(djs, read_by_writer_token);
     ROCKSDB_JSON_SET_PROP(djs, token_use_idle);
     ROCKSDB_JSON_SET_PROP(djs, accurate_memsize);
@@ -1049,7 +1052,9 @@ void CSPPMemTab::MarkFlushed() {
     ROCKS_LOG_WARN(m_log, "cspp-%06zd: vm_commit_fail: cnt = %zd, len = %zd",
         m_instance_idx, mp.m_vm_commit_fail_cnt, mp.m_vm_commit_fail_len);
   }
-  ColdizeMemory("CSPPMemTab::MarkFlushed");
+  if (m_fac->vm_coldize_on_flush) {
+    ColdizeMemory("CSPPMemTab::MarkFlushed");
+  }
   m_is_flushed = true;
 }
 void CSPPMemTab::ColdizeMemory(const char* func) {
