@@ -86,7 +86,7 @@ CSPPMemTab 创建时预分配的内存可以是文件 mmap，此时文件在创�
 只有在我们实际向虚拟内存地址写入内容时，操作系统才会分配对应的物理内存（以 Page 为单位），
 只有当这些内存 Page 变脏（写入了内容）超过一定时间，操作系统才会把这些 Page 写入文件，
 此时才会实际分配磁盘空间。
-> 用 `ls -l -s --block-size=1K` 同时查看文件实际占用的空间和文件的名义尺寸。
+> 用 `ls -l -s -h` 同时查看文件实际占用的空间和文件的名义尺寸。
 
 当 CSPP MemTable 从 Active 转化为 Immutable（被标记为 ReadOnly）时，文件被 truncate 到真实尺寸，
 转化 SST 时，只需要在文件后面追加 SST File Footer 即可。为此实现一个包装器，将 CSPP MemTable 包装
