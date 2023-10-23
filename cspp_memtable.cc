@@ -97,8 +97,9 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     ~Token();
     bool init_value(void* trie_valptr, size_t trie_valsize) noexcept final;
     void destroy_value(void* valptr, size_t valsize) noexcept final;
-    bool insert_for_dup_user_key();
+    bool insert_for_dup_user_key(CSPPMemTab*);
   };
+  void OnDupUserKeyYield();
   bool insert_kv(fstring ikey, const Slice& val, Token*);
   bool InsertKeyValueConcurrently(const Slice& ikey, const Slice& val) final {
     if (UNLIKELY(m_is_empty)) { // must check, avoid write as possible
@@ -370,15 +371,16 @@ bool CSPPMemTab::insert_kv(fstring ikey, const Slice& val, Token* tok) {
                     m_trie.mem_capacity(), m_trie.mmap_fpath());
     return true; // done: value insert has been handled in init_value
   }
-  return tok->insert_for_dup_user_key();
+  return tok->insert_for_dup_user_key(this);
 }
-bool CSPPMemTab::Token::insert_for_dup_user_key() {
-  auto trie = static_cast<MainPatricia*>(m_trie);
+bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
+  auto trie = &tab->m_trie;
   auto vec_pin_pos = trie->value_of<uint32_t>(*this);
   auto vec_pin = (VecPin*)trie->mem_get(vec_pin_pos);
   uint32_t num;
   while (LOCK_FLAG & (num = as_atomic(vec_pin->num)
                            .fetch_or(LOCK_FLAG, std::memory_order_acquire))) {
+    tab->OnDupUserKeyYield();
     std::this_thread::yield(); // has been locked by other threads, yield
   }
   const uint32_t old_cap = vec_pin->cap;
@@ -661,6 +663,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   size_t live_num = 0, live_iter_num = 0;
   size_t max_dup_len = 1;
   size_t num_dup_user_keys = 0;
+  size_t num_dup_yields = 0;
   uint64_t deactived_mem_sum = 0;
   MemTabLinkListNode m_head;
   mutable std::mutex m_mtx;
@@ -839,6 +842,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     }
     ROCKSDB_JSON_SET_PROP(djs, max_dup_len);
     ROCKSDB_JSON_SET_PROP(djs, num_dup_user_keys);
+    ROCKSDB_JSON_SET_PROP(djs, num_dup_yields);
     ROCKSDB_JSON_SET_PROP(djs, cumu_iter_num);
     ROCKSDB_JSON_SET_PROP(djs, live_iter_num);
     size_t active_num = 0;
@@ -906,6 +910,9 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     return djs;
   }
 };
+void CSPPMemTab::OnDupUserKeyYield() {
+  as_atomic(m_fac->num_dup_yields).fetch_add(1, std::memory_order_relaxed);
+}
 MemTableRep::Iterator* CSPPMemTab::GetIterator(Arena* a) {
 #if 0
   if (m_is_sst) {
