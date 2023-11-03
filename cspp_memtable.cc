@@ -500,7 +500,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     }
     return true;
   }
-  bool NextAndGetResult(IterateResult* result) {
+  bool NextAndGetResult(IterateResult* result) final {
     if (LIKELY(NextAndCheckValid())) {
       result->SetKey(this->key());
       result->bound_check_result = IterBoundCheck::kUnknown;
