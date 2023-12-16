@@ -214,14 +214,6 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
 #endif
   }
   uint64_t ApproximateNumEntries(const Slice&, const Slice&) final;
-  struct KeyValueForGet : public KeyValuePair {
-    inline static Slice cp(Slice ikey, void* buf) {
-      memcpy(buf, ikey.data_, ikey.size_ - 8); // just copy user key
-      return Slice((char*)buf, ikey.size_); // ikey: tag is pending
-    }
-    KeyValueForGet(Slice ikey, void* buf) : KeyValuePair(cp(ikey, buf), Slice()) {}
-    void SetTag(uint64_t tag) { memcpy((char*)ikey.end() - 8, &tag, 8); }
-  };
   terark_forceinline Slice GetValue(const Entry& e) const {
     return e.GetValue(m_trie.mem_get(0));
   }
@@ -242,7 +234,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     auto vec_pin = (VecPin*)m_trie.mem_get(vec_pin_pos);
     size_t num = vec_pin->num & ~LOCK_FLAG;
     auto entry = (Entry*)m_trie.mem_get(vec_pin->pos);
-    KeyValueForGet key_val(ikey, alloca(ikey.size_));
+    KeyValuePair key_val(ExtractUserKey(ikey));
     uint64_t find_tag = DecodeFixed64(ikey.data_ + ikey.size_ - 8);
     intptr_t idx = upper_bound_0(entry, num, find_tag);
     if (UNLIKELY(ro.just_check_key_exists)) {
@@ -252,13 +244,13 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
           // instruct get_context to stop earlier
           tag = (tag & ~uint64_t(255)) | kTypeValue;
         }
-        key_val.SetTag(tag);
+        key_val.tag = tag;
         if (!callback_func(callback_args, key_val))
           break;
       }
     }
     else while (idx--) {
-      key_val.SetTag(entry[idx].tag);
+      key_val.tag = entry[idx].tag;
       key_val.value = GetValue(entry[idx]);
       if (!callback_func(callback_args, key_val))
         break;
