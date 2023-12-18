@@ -223,10 +223,10 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     if (UNLIKELY(m_is_empty)) {
       return;
     }
-    const Slice ikey = k.internal_key();
+    KeyValuePair key_val(ExtractUserKey(k.internal_key()));
     auto token = reader_token();
     token->acquire(&m_trie);
-    if (!m_trie.lookup(fstring(ikey.data_, ikey.size_ - 8), token)) {
+    if (!m_trie.lookup(fstring(key_val.ukey), token)) {
       m_token_use_idle ? token->idle() : token->release();
       return;
     }
@@ -234,8 +234,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     auto vec_pin = (VecPin*)m_trie.mem_get(vec_pin_pos);
     size_t num = vec_pin->num & ~LOCK_FLAG;
     auto entry = (Entry*)m_trie.mem_get(vec_pin->pos);
-    KeyValuePair key_val(ExtractUserKey(ikey));
-    uint64_t find_tag = DecodeFixed64(ikey.data_ + ikey.size_ - 8);
+    uint64_t find_tag = DecodeFixed64(key_val.ukey.end());
     intptr_t idx = upper_bound_0(entry, num, find_tag);
     if (UNLIKELY(ro.just_check_key_exists)) {
       while (idx--) {
