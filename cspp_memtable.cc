@@ -862,18 +862,24 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
           detail_qlen|"<strong>("|idx|","|cur_qlen|","|raw_iter|")</strong>, ";
         else
           detail_qlen|"**("|idx|","|cur_qlen|","|raw_iter|")**, ";
-      else if (memtab->m_trie.is_readonly())
+      else if (memtab->m_trie.is_readonly()) // real readonly
         detail_qlen|"("|idx|","|cur_qlen|","|raw_iter|"), ";
       else if (memtab->m_has_marked_readonly)
         if (html)
           detail_qlen|"<span style='color:darkgreen'>("|idx|","|cur_qlen|","|raw_iter|")</span>, ";
         else
           detail_qlen|"-("|idx|","|cur_qlen|","|raw_iter|")-, ";
-      else
+      else if (!memtab->m_is_empty) // active
         if (html)
-          detail_qlen|"<em>("|idx|","|cur_qlen|","|raw_iter|")</em>, ";
+          detail_qlen|"<strong style='color:darkred'>("|idx|","|cur_qlen|","|raw_iter|")</strong>, ";
         else
           detail_qlen|"*("|idx|","|cur_qlen|","|raw_iter|")*, ";
+      else // prepared
+        if (html)
+          // counter intuitive: darkgray is lighter than gray, so use gray
+          detail_qlen|"<span style='color:gray'>("|idx|","|cur_qlen|","|raw_iter|")</span>, ";
+        else
+          detail_qlen|"+("|idx|","|cur_qlen|","|raw_iter|")+, ";
     }
     size_t deactived_num; // include history and living readonly memtab
     if (LIKELY(m_head.m_prev != &m_head)) { // not empty
@@ -901,11 +907,14 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_PROP(djs, live_num);
     ROCKSDB_JSON_SET_PROP(djs, token_qlen);
     ROCKSDB_JSON_SET_PROP(djs, total_raw_iter);
-    djs["comment"] = "(idx, qlen, raw_iter_num), "
-                     "<strong>strong: flushed</strong>, "
-                     "normal: real readonly, "
-      "<span style='color:darkgreen'>marked readonly: darkgreen</span>, "
-                     "<em>em: active</em>";
+    djs["comment"] = "(idx, qlen, raw_iter_num) | "
+                     "<strong>flushed</strong> | "
+                     "real readonly | "
+      "<span style='color:darkgreen'>marked readonly</span> | "
+      "<strong style='color:darkred'>active</strong> | "
+      // counter intuitive: darkgray is lighter than gray, so use gray
+      "<span style='color:gray'>prepared</span>"
+                     ;
     ROCKSDB_JSON_SET_PROP(djs, detail_qlen);
     JS_CSPPMemTab_AddVersion(djs, html);
     return djs;
