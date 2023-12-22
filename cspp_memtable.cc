@@ -849,7 +849,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     for (auto node = m_head.m_next; node != &m_head; node = node->m_next) {
       auto memtab = static_cast<CSPPMemTab*>(node);
       live_used_mem += memtab->m_trie.mem_size_inline();
-      if (!memtab->m_trie.is_readonly())
+      if (!memtab->m_has_marked_readonly && !memtab->m_is_sst)
         active_num++,
         active_used_mem += memtab->m_trie.mem_size_inline();
       size_t idx = memtab->m_instance_idx;
