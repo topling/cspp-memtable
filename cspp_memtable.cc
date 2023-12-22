@@ -71,6 +71,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   bool          m_is_empty = true;
   bool          m_is_sst : 1;
   bool          m_has_converted_to_sst : 1;
+  bool          m_has_marked_readonly : 1; // pre C++20 can not init on define
   ConvertKind   m_convert_to_sst;
   CSPPMemTabFactory* m_fac;
   Logger*  m_log;
@@ -863,6 +864,11 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
           detail_qlen|"**("|idx|","|cur_qlen|","|raw_iter|")**, ";
       else if (memtab->m_trie.is_readonly())
         detail_qlen|"("|idx|","|cur_qlen|","|raw_iter|"), ";
+      else if (memtab->m_has_marked_readonly)
+        if (html)
+          detail_qlen|"<span style='color:darkgreen'>("|idx|","|cur_qlen|","|raw_iter|")</span>, ";
+        else
+          detail_qlen|"-("|idx|","|cur_qlen|","|raw_iter|")-, ";
       else
         if (html)
           detail_qlen|"<em>("|idx|","|cur_qlen|","|raw_iter|")</em>, ";
@@ -895,7 +901,11 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_PROP(djs, live_num);
     ROCKSDB_JSON_SET_PROP(djs, token_qlen);
     ROCKSDB_JSON_SET_PROP(djs, total_raw_iter);
-    djs["comment"] = "(idx, qlen, raw_iter_num), <strong>strong: flushed</strong>, normal: readonly, <em>em: active</em>";
+    djs["comment"] = "(idx, qlen, raw_iter_num), "
+                     "<strong>strong: flushed</strong>, "
+                     "normal: real readonly, "
+      "<span style='color:darkgreen'>marked readonly: darkgreen</span>, "
+                     "<em>em: active</em>";
     ROCKSDB_JSON_SET_PROP(djs, detail_qlen);
     JS_CSPPMemTab_AddVersion(djs, html);
     return djs;
@@ -957,6 +967,7 @@ inline void CSPPMemTab::init(bool rev, Logger* log, CSPPMemTabFactory* f) {
   m_log = log;
   m_rev = rev;
   m_has_converted_to_sst = false;
+  m_has_marked_readonly = false;
   m_read_by_writer_token = f->read_by_writer_token;
   m_token_use_idle = f->token_use_idle;
   m_accurate_memsize = f->accurate_memsize;
@@ -1040,6 +1051,7 @@ void CSPPMemTab::MarkReadOnly() {
   } else {
     ConvertToReadOnly("MarkReadOnly", ""); // sst_name is unknow
   }
+  m_has_marked_readonly = true;
 }
 void CSPPMemTab::MarkFlushed() {
   if (!m_trie.is_readonly()) {
