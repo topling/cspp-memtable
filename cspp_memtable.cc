@@ -1509,7 +1509,7 @@ void CSPPMemTab::ToWebViewJson(json& djs, const json& dump_options) const {
   ROCKSDB_JSON_SET_PROP(djs, fac.num_dup_user_keys);
 }
 Status CSPPMemTabTableFactory::NewTableReader(
-              const ReadOptions& ro,
+              const ReadOptions&,
               const TableReaderOptions& tro,
               std::unique_ptr<RandomAccessFileReader>&& file,
               uint64_t file_size,
