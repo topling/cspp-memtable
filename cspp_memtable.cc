@@ -431,6 +431,25 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
 }
 struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   Patricia::Iterator* m_iter;
+ #if defined(_MSC_VER) || defined(__clang__)
+  void CreateDfaIter() {
+    m_iter = m_tab->m_trie.new_iter();
+  }
+  bool InvokeDfaIterNext() { return m_iter->incr(); }
+  bool InvokeDfaIterPrev() { return m_iter->decr(); }
+ #else
+  #pragma GCC diagnostic ignored "-Wpmf-conversions"
+  typedef bool (*DfaIterScanFN)(ADFA_LexIterator*);
+  DfaIterScanFN m_dfa_iter_next;
+  DfaIterScanFN m_dfa_iter_prev;
+  void CreateDfaIter() {
+    m_iter = m_tab->m_trie.new_iter();
+    m_dfa_iter_next = (DfaIterScanFN)(m_iter->*(&ADFA_LexIterator::incr));
+    m_dfa_iter_prev = (DfaIterScanFN)(m_iter->*(&ADFA_LexIterator::decr));
+  }
+  inline bool InvokeDfaIterNext() { return m_dfa_iter_next(m_iter); }
+  inline bool InvokeDfaIterPrev() { return m_dfa_iter_prev(m_iter); }
+ #endif
   CSPPMemTab* m_tab;
   const char* m_mempool = nullptr; // used for speed up memory access
   const VecPin* m_vec_pin = nullptr; // used for speed up memory access
@@ -480,7 +499,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   bool NextAndCheckValid() final {
     TERARK_ASSERT_GE(m_idx, 0);
     if (m_idx-- == 0) {
-      if (UNLIKELY(!(m_rev ? m_iter->decr() : m_iter->incr()))) {
+      if (UNLIKELY(!(m_rev ? InvokeDfaIterPrev() : InvokeDfaIterNext()))) {
         TERARK_ASSERT_LT(m_idx, 0);
         return false; // fail
       }
@@ -511,7 +530,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     TERARK_ASSERT_GE(m_idx, 0);
     auto entry = AccessEntryVec(m_vec_pin);
     if (++m_idx == entry.num) {
-      if (UNLIKELY(!(m_rev ? m_iter->incr() : m_iter->decr()))) {
+      if (UNLIKELY(!(m_rev ? InvokeDfaIterNext() : InvokeDfaIterPrev()))) {
         m_idx = -1;
         return false; // fail
       }
@@ -527,7 +546,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   void Seek(const Slice& ikey) final {
     if (UNLIKELY(!m_iter)) {
       if (m_tab->m_is_empty) return;
-      m_iter = m_tab->m_trie.new_iter();
+      CreateDfaIter();
     }
     fstring user_key = ExtractUserKey(ikey);
     uint64_t find_tag = DecodeFixed64(user_key.end());
@@ -544,7 +563,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
         AppendTag(entry.vec[m_idx].tag);
         return; // success
       }
-      if (UNLIKELY(!(m_rev ? iter.decr() : iter.incr()))) {
+      if (UNLIKELY(!(m_rev ? InvokeDfaIterPrev() : InvokeDfaIterNext()))) {
         TERARK_ASSERT_LT(m_idx, 0);
         return; // fail
       }
@@ -559,7 +578,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   void SeekForPrev(const Slice& ikey) final {
     if (UNLIKELY(!m_iter)) {
       if (m_tab->m_is_empty) return;
-      m_iter = m_tab->m_trie.new_iter();
+      CreateDfaIter();
     }
     fstring user_key = ExtractUserKey(ikey);
     uint64_t find_tag = DecodeFixed64(user_key.end());
@@ -576,7 +595,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
         AppendTag(entry.vec[m_idx].tag);
         return; // success
       }
-      if (UNLIKELY(!(m_rev ? iter.incr() : iter.decr()))) {
+      if (UNLIKELY(!(m_rev ? InvokeDfaIterNext() : InvokeDfaIterPrev()))) {
         m_idx = -1;
         return; // fail
       }
@@ -588,7 +607,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   void SeekToFirst() final {
     if (UNLIKELY(!m_iter)) {
       if (m_tab->m_is_empty) return;
-      m_iter = m_tab->m_trie.new_iter();
+      CreateDfaIter();
     }
     if (UNLIKELY(!(m_rev ? m_iter->seek_end() : m_iter->seek_begin()))) {
       m_idx = -1;
@@ -600,7 +619,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   void SeekToLast() final {
     if (UNLIKELY(!m_iter)) {
       if (m_tab->m_is_empty) return;
-      m_iter = m_tab->m_trie.new_iter();
+      CreateDfaIter();
     }
     if (UNLIKELY(!(m_rev ? m_iter->seek_begin() : m_iter->seek_end()))) {
       m_idx = -1;
