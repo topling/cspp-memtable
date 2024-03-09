@@ -642,7 +642,7 @@ void JS_CSPPMemTab_AddVersion(json& djs, bool html) {
       return terark::fstring(&*pos, s.end() - pos);
     };
     auto topling_rocks_sha_end = std::find_if(topling_rocks.begin(), topling_rocks.end(), &isspace);
-    terark::string_appender<> oss_rocks;
+    terark::string_appender<> oss_rocks(valvec_reserve(), 512);
     oss_rocks|"<pre>"
              |"<a href='https://github.com/topling/cspp-memtable/commit/"
              |headstr(topling_rocks, topling_rocks_sha_end)|"'>"
@@ -706,8 +706,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     auto curr_use_hugepage = this->use_hugepage;
     auto curr_convert_to_sst = this->convert_to_sst;
     auto curr_num = as_atomic(cumu_num).fetch_add(1, std::memory_order_relaxed);
-    terark::string_appender<> conf;
-    conf.reserve(512);
+    terark::string_appender<> conf(valvec_reserve(), 512);
     conf|"?chunk_size="|curr_chunk_size;
     if (ConvertKind::kFileMmap == curr_convert_to_sst) {
       // File mmap does not support hugepage
@@ -861,8 +860,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     size_t live_used_mem = 0;
     size_t token_qlen = 0;
     size_t total_raw_iter = 0;
-    string_appender<> detail_qlen;
-    detail_qlen.reserve(128*live_num);
+    string_appender<> detail_qlen(valvec_reserve(), 128*live_num);
     detail_qlen << "[ ";
     m_mtx.lock();
     for (auto node = m_head.m_next; node != &m_head; node = node->m_next) {
