@@ -669,6 +669,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   bool   sync_sst_file = true;
   bool   enableApproximateNumEntries = false; // may be pretty not accurate
   ConvertKind convert_to_sst = ConvertKind::kDontConvert;
+  std::string chroot_dir; // default empty
   size_t chunk_size = huge_2m;
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
@@ -710,7 +711,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     conf|"?chunk_size="|curr_chunk_size;
     if (ConvertKind::kFileMmap == curr_convert_to_sst) {
       // File mmap does not support hugepage
-      conf|"&file_path="|level0_dir;
+      conf|"&file_path="|chroot_dir|level0_dir;
       conf^"/cspp-%06zd.memtab"^curr_num^"-"^cf_id;
     } else {
       conf|"&hugepage="|int(curr_use_hugepage);
@@ -786,6 +787,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_OPT_ENUM(js, convert_to_sst);
     ROCKSDB_JSON_OPT_PROP(js, sync_sst_file);
     ROCKSDB_JSON_OPT_PROP(js, enableApproximateNumEntries);
+    ROCKSDB_JSON_OPT_PROP(js, chroot_dir);
     iter = js.find("chunk_size");
     if (js.end() != iter) {
       ROCKSDB_JSON_OPT_SIZE(js, chunk_size);
@@ -840,6 +842,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_ENUM(djs, convert_to_sst);
     ROCKSDB_JSON_SET_PROP(djs, sync_sst_file);
     ROCKSDB_JSON_SET_PROP(djs, enableApproximateNumEntries);
+    ROCKSDB_JSON_SET_PROP(djs, chroot_dir);
     { // cspp global conf
       long val = CSPP_GetDebugLevel();
       if (val >= 0 && val <= 3) {
