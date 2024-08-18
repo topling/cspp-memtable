@@ -681,6 +681,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   mutable std::mutex m_mtx;
   CSPPMemTabFactory(const json& js, const SidePluginRepo& r) {
     m_head.m_next = m_head.m_prev = &m_head;
+    ROCKSDB_JSON_OPT_PROP(js, chroot_dir); // immutable
     Update({}, js, r);
   }
   MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator& cmp,
@@ -787,7 +788,6 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_OPT_ENUM(js, convert_to_sst);
     ROCKSDB_JSON_OPT_PROP(js, sync_sst_file);
     ROCKSDB_JSON_OPT_PROP(js, enableApproximateNumEntries);
-    ROCKSDB_JSON_OPT_PROP(js, chroot_dir);
     iter = js.find("chunk_size");
     if (js.end() != iter) {
       ROCKSDB_JSON_OPT_SIZE(js, chunk_size);
