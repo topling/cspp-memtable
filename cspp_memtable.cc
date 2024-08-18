@@ -1275,7 +1275,10 @@ try {
   const bool is_file_mmap = ConvertKind::kFileMmap == m_convert_to_sst;
   double t0 = clock->NowMicros();
   if (is_file_mmap) {
-    const std::string& src_fname = m_trie.mmap_fpath();
+    std::string src_fname = m_trie.mmap_fpath();
+    size_t chroot_len = m_fac->chroot_dir.size();
+    TERARK_VERIFY_S_EQ(fstring(src_fname).prefix(chroot_len), m_fac->chroot_dir);
+    src_fname.erase(0, chroot_len);
     IOStatus ios = fs->RenameFile(src_fname, fname, fopt.io_options, &dbg_ctx);
     if (!ios.ok()) {
       ROCKS_LOG_ERROR(m_log, "rename(%s, %s) = %s",
