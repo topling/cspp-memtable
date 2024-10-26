@@ -2,7 +2,13 @@ SHELL := $(shell which bash)
 OSS_ROOT ?= terark-downloads
 DBG_FLAGS ?= -g3 -D_DEBUG
 RLS_FLAGS ?= -O3 -DNDEBUG -g3
+MARCH ?= $(shell uname -m)
+ifeq "${MARCH}" "x86_64"
 WITH_BMI2 ?= $(shell bash ./cpu_has_bmi2.sh)
+else
+# not available
+WITH_BMI2 ?= na
+endif
 ROCKSDB_SRC ?= ../rocksdb
 TERARK_CORE_HOME ?= ../terark
 VCPKG_HOME ?= /node-shared/vcpkg
