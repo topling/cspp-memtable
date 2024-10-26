@@ -166,7 +166,7 @@ export LD_LIBRARY_PATH=.:`find sideplugin -name lib_shared`:${LD_LIBRARY_PATH}
   -benchmarks=fillrandom,readrandom,readwrite \
   -write_buffer_size=536870912 -item_size=0 -num_operations=10000000
 ```
-该测试结果一般可体现出 CSPP 相比 SkipList，**写性能有 6 倍的优势，读性能 有 8 倍的优势**。
+该测试结果一般可体现出 CSPP 相比 SkipList，在 X86_64上 **写性能有 6 倍的优势，读性能 有 8 倍的优势**，在 ARM 上分别是 10 倍 和 11 倍。
 * 注意：-item_size=0 表示将 value 的长度设为 0，从而去除 memcpy value 的影响
 * 注意：测试结果中最有参考价值的指标是 **write us/op** 和 **read us/op**
 * 注意：memtablerep_bench 仅测试 MemTableRep 的性能，调用链的开销很低
