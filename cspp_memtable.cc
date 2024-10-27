@@ -11,6 +11,10 @@
 #include "table/top_table_reader.h"
 #include "topling/builtin_table_factory.h"
 
+#if defined(_MSC_VER)
+  #pragma warning(disable: 4245) // convert int to size_t in fsa of cspp
+  #pragma warning(disable: 4458) // deactived_mem_sum hide class member(intentional)
+#endif
 #include <terark/fsa/cspptrie.inl>
 #include <terark/num_to_str.hpp>
 #include <terark/util/vm_util.hpp>
@@ -22,8 +26,8 @@
 
 const char* git_version_hash_info_cspp_memtable();
 namespace terark {
-extern void CSPP_SetDebugLevel(long level); // defined in cspptrie.cpp
-extern long CSPP_GetDebugLevel();           // defined in cspptrie.cpp
+TERARK_DLL_EXPORT void CSPP_SetDebugLevel(long level); // defined in cspptrie.cpp
+TERARK_DLL_EXPORT long CSPP_GetDebugLevel();           // defined in cspptrie.cpp
 } // namespace terark
 namespace ROCKSDB_NAMESPACE {
 using namespace terark;
@@ -1235,11 +1239,15 @@ public:
     WriteBlock(data, file_, &offset_); // ignore ret
   }
 };
+#if defined(_MSC_VER)
+  #pragma warning(disable: 4702) // unreachable code, must out of func
+#endif
 static size_t SeekToEnd(WritableFileWriter& writer, Logger* log) {
   auto fs_file = writer.writable_file();
   auto fd = fs_file->FileDescriptor();
 #if defined(_MSC_VER)
-  TODO ......
+  auto endpos = fd; // use fd
+  ROCKSDB_DIE("TODO");
 #else
   auto endpos = ::lseek(int(fd), 0, SEEK_END);
   if (endpos < 0) {
