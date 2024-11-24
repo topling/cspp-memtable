@@ -474,7 +474,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     return { entry_num, entry_vec };
   }
   terark_forceinline void AppendTag(uint64_t tag) const {
-    memcpy(m_iter->mutable_word().ensure_unused(8), &tag, 8);
+    unaligned_save(m_iter->mutable_word().ensure_unused(8), tag);
   }
   explicit Iter(CSPPMemTab*);
   ~Iter() noexcept override;
