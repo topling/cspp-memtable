@@ -466,11 +466,12 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     auto vec_pin_pos = *(uint32_t*)(mempool + m_iter->get_valpos());
     auto vec_pin_ptr = (VecPin*)(mempool + Align * vec_pin_pos);
     m_vec_pin = vec_pin_ptr; // save to m_vec_pin for laster use for speed up
-    return AccessEntryVec(vec_pin_ptr);
+    return AccessEntryVec(vec_pin_ptr, mempool);
   }
-  terark_forceinline EntryVec AccessEntryVec(const VecPin* vec_pin) const {
+  terark_forceinline
+  EntryVec AccessEntryVec(const VecPin* vec_pin, const char* mempool) const {
     auto entry_num = int(vec_pin->num & ~LOCK_FLAG);
-    auto entry_vec = (Entry*)(m_mempool + Align * vec_pin->pos);
+    auto entry_vec = (Entry*)(mempool + Align * vec_pin->pos);
     return { entry_num, entry_vec };
   }
   terark_forceinline void AppendTag(uint64_t tag) const {
@@ -532,7 +533,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   }
   bool PrevAndCheckValid() final {
     TERARK_ASSERT_GE(m_idx, 0);
-    auto entry = AccessEntryVec(m_vec_pin);
+    auto entry = AccessEntryVec(m_vec_pin, m_mempool);
     if (++m_idx == entry.num) {
       if (UNLIKELY(!(m_rev ? InvokeDfaIterNext() : InvokeDfaIterPrev()))) {
         m_idx = -1;
