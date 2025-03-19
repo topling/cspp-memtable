@@ -70,6 +70,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   bool          m_read_by_writer_token;
   bool          m_token_use_idle;
   bool          m_accurate_memsize;
+  bool          m_ref_to_wal : 1;
   bool          m_rev : 1;
   bool          m_is_flushed : 1;
   bool          m_is_empty : 1;
@@ -92,6 +93,10 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   CSPPMemTab(bool rev, Logger*, CSPPMemTabFactory*, size_t instance_idx);
   void init(bool rev, Logger*, CSPPMemTabFactory*);
   ~CSPPMemTab() noexcept override;
+  void InitSetMemTableAsLogIndex(bool b) final {
+    m_ref_to_wal = b && SupportConvertToSST();
+  }
+  bool SupportMemTableAsLogIndex() const { return m_ref_to_wal; }
   KeyHandle Allocate(const size_t, char**) final { TERARK_DIE("Bad call"); }
   void Insert(KeyHandle) final { TERARK_DIE("Bad call"); }
   struct Token : public Patricia::WriterToken {
@@ -1007,6 +1012,7 @@ inline void CSPPMemTab::init(bool rev, Logger* log, CSPPMemTabFactory* f) {
   m_read_by_writer_token = f->read_by_writer_token;
   m_token_use_idle = f->token_use_idle;
   m_accurate_memsize = f->accurate_memsize;
+  m_ref_to_wal = false;
   f->m_mtx.lock();
   f->live_num++;
   m_next = &f->m_head; // insert 'this' at linked list tail
