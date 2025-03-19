@@ -1541,6 +1541,27 @@ try {
   builder.properties_.num_merge_operands = meta->num_merges;
   builder.properties_.raw_key_size = meta->raw_key_size;
   builder.properties_.raw_value_size = meta->raw_value_size;
+  if (m_ref_to_wal) {
+    auto& oss = static_cast<string_appender<>&>(builder.properties_.compression_options);
+    oss.clear();
+    oss|"LogIndex;";
+    if (m_num_wals) {
+      meta->oldest_blob_file_number = UINT64_MAX;
+      for (size_t i = 0; i < m_num_wals; i++) {
+        auto& e = m_wals[i];
+        auto blob_no = tbo.generate_file_no();
+        auto walname = LogFileName(ioptions.GetWalDir(), e.fileno);
+        auto refname = BlobFileName(ioptions.cf_paths[0].path, blob_no);
+        IOStatus ios = fs->LinkFile(walname, refname, fopt.io_options, &dbg_ctx);
+        if (!ios.ok())
+          return ios;
+        oss|blob_no|":"|e.fileno|":"|e.cnt|":"|e.bytes|",";
+        tbo.add_blob_file({blob_no, e.cnt, e.bytes, "", ""});
+        terark::minimize(meta->oldest_blob_file_number, blob_no);
+      }
+      oss.pop_back(); // remove the trailing comma ','
+    }
+  }
   Status s = builder.Finish();
   if (!s.ok()) {
     return s;
@@ -1706,7 +1727,37 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
    .fetch_add(m_memtab->num_dup_user_keys, std::memory_order_relaxed);
 
   table_properties_->compression_name = "CSPPMemTab";
-  table_properties_->compression_options.clear();
+  std::string& compression_options = table_properties_->compression_options;
+  if (Slice(compression_options).starts_with("LogIndex;")) {
+    char* item = &compression_options[strlen("LogIndex;")];
+    m_memtab->m_ref_to_wal = true;
+    for (size_t i = 0; true; i++) {
+      size_t blob_no = 0, wal_no = 0, cnt = 0, bytes = 0;
+      int fields = sscanf(item, "%zd:%zd:%zd:%zd", &blob_no, &wal_no, &cnt, &bytes);
+      ROCKSDB_ASSERT_EQ(fields, 4);
+      if (4 != fields) {
+        THROW_STD(logic_error, "must be blob_no:wal_no:cnt:bytes, but is: %s", item);
+      }
+      auto fpath = BlobFileName(tro.ioptions.cf_paths[0].path, blob_no);
+      auto [fmap, ios] = ReadonlyFileMmap::New(*tro.ioptions.fs, blob_no, fpath);
+      TERARK_VERIFY_S(ios.ok(), "ReadonlyFileMmap %s, %s", fpath, ios.ToString());
+      m_memtab->m_wals[i].fileno = wal_no;
+      m_memtab->m_wals[i].cnt = cnt;
+      m_memtab->m_wals[i].wal = fmap.get();
+      m_memtab->m_wals[i].bytes = bytes;
+      m_memtab->m_hold_wals.push_back(fmap);
+      // gdic_size is also used in version_set.cc FileSizeForScore()
+      table_properties_->gdic_size += bytes;
+      item = strchr(item, ',');
+      if (item)
+        item += 1;
+      else
+        break;
+    }
+    m_memtab->m_num_wals = m_memtab->m_hold_wals.size();
+    if (m_memtab->m_num_wals)
+      compression_options.push_back(';');
+  }
   as_string_appender(table_properties_->compression_options)
     | "Free = "|SizeToString(m_memtab->m_trie.mem_frag_size());
   as_string_appender(table_properties_->compression_options)
