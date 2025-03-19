@@ -60,6 +60,30 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     uint32_t cap;
     uint32_t pos;
   };
+  struct KeyValueToLogRef {
+    operator uint64_t() const noexcept { return tag; } // NOLINT
+    uint64_t tag;
+    union {
+      struct {
+        uint64_t key_pos; // to wal
+        uint64_t val_pos; // to wal
+        uint64_t fileno;
+        uint32_t val_len;
+        uint32_t key_len : 24; // Little Endian
+        uint32_t inline_val_len : 8;
+      };
+      char value[31];
+    };
+    Slice GetValue(const CSPPMemTab* mtab) const noexcept {
+      if (inline_val_len <= sizeof(value)) {
+        return {value, inline_val_len};
+      }
+      auto wal = mtab->find_wal(fileno);
+      auto base = wal->data_;
+      return {base + val_pos, val_len};
+    }
+  };
+  static_assert(sizeof(KeyValueToLogRef) == 40);
 #pragma pack(pop)
   static void encode_pre(Slice d, void* buf) {
     assert(d.size_ > 0); // empty `d` will not call this function
@@ -70,6 +94,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   bool          m_read_by_writer_token;
   bool          m_token_use_idle;
   bool          m_accurate_memsize;
+  bool          m_ref_to_wal : 1;
   bool          m_rev : 1;
   bool          m_is_flushed : 1;
   bool          m_is_empty : 1;
@@ -87,11 +112,65 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
 #if defined(ROCKSDB_UNIT_TEST)
   size_t   m_mem_size = 0;
 #endif
+  struct LogFileLookup {
+    uint32_t fileno = 0;
+    uint32_t cnt = 0;
+    uint64_t bytes = 0;
+    const ReadonlyFileMmap* wal = 0;
+  };
+  static constexpr size_t MAX_WALS = 16; // for fast search
+  size_t m_num_wals = 0;
+  LogFileLookup m_wals[MAX_WALS] = {};
+  std::vector<std::shared_ptr<ReadonlyFileMmap> > m_hold_wals; // just hold
+  std::mutex m_mtx;
+  const ReadonlyFileMmap* find_wal(size_t fileno) const {
+    assert(0 != fileno);
+    for (size_t i = 0; i < m_num_wals; i++) {
+      if (m_wals[i].fileno == fileno)
+        return m_wals[i].wal;
+    }
+    ROCKSDB_DIE("not found fileno %zd", fileno);
+    return nullptr;
+  }
+  void add_wal(size_t fileno, size_t bytes, const ReadonlyFileMmap* wal) {
+    assert(0 != fileno);
+    size_t i = 0;
+    while (i < m_num_wals) {
+      if (m_wals[i].fileno == fileno) {
+        TERARK_VERIFY_EQ(m_wals[i].wal, wal);
+        m_wals[i].cnt++;
+        m_wals[i].bytes += bytes;
+        return;
+      }
+      i++;
+    }
+    std::lock_guard<std::mutex> lk(m_mtx);
+    while (i < m_num_wals) {
+      if (m_wals[i].fileno == fileno) {
+        TERARK_VERIFY_EQ(m_wals[i].wal, wal);
+        m_wals[i].cnt++;
+        m_wals[i].bytes += bytes;
+        return;
+      }
+      i++;
+    }
+    TERARK_VERIFY_LT(m_num_wals, MAX_WALS);
+    m_wals[i].cnt = 1;
+    m_wals[i].wal = wal;
+    m_wals[i].bytes = bytes;
+    m_wals[i].fileno = uint32_t(fileno);
+    as_atomic(m_num_wals).fetch_add(1); // update last
+    m_hold_wals.emplace_back(((ReadonlyFileMmap*)wal)->shared_from_this());
+  }
   CSPPMemTab(intptr_t cap, bool rev, Logger*, CSPPMemTabFactory*,
              size_t instance_idx, ConvertKind, fstring fpath_or_conf);
   CSPPMemTab(bool rev, Logger*, CSPPMemTabFactory*, size_t instance_idx);
   void init(bool rev, Logger*, CSPPMemTabFactory*);
   ~CSPPMemTab() noexcept override;
+  void InitSetMemTableAsLogIndex(bool b) final {
+    m_ref_to_wal = b && SupportConvertToSST();
+  }
+  bool SupportMemTableAsLogIndex() const final { return m_ref_to_wal; }
   KeyHandle Allocate(const size_t, char**) final { TERARK_DIE("Bad call"); }
   void Insert(KeyHandle) final { TERARK_DIE("Bad call"); }
   struct Token : public Patricia::WriterToken {
@@ -100,6 +179,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     size_t max_dup_len = 1;
     size_t num_dup_user_keys = 0;
     ~Token();
+    void SetKeyValueToLogRef(KeyValueToLogRef*);
     bool init_value(void* trie_valptr, size_t trie_valsize) noexcept final;
     void destroy_value(void* valptr, size_t valsize) noexcept final;
     bool insert_for_dup_user_key(CSPPMemTab*);
@@ -163,8 +243,11 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     uint64_t find_tag = DecodeFixed64(user_key.end());
     auto vec_pin = (VecPin*)m_trie.mem_get(m_trie.value_of<uint32_t>(*token));
     auto num = vec_pin->num & ~LOCK_FLAG;
-    auto entry = (Entry*)m_trie.mem_get(vec_pin->pos);
-    bool ret = binary_search_0(entry, num, find_tag);
+    auto bs = [&](auto entry) {
+      return binary_search_0(entry, num, find_tag);
+    };
+    auto p = m_trie.mem_get(vec_pin->pos);
+    bool ret = m_ref_to_wal ? bs((KeyValueToLogRef*)p) : bs((Entry*)p);
     m_token_use_idle ? token->idle() : token->release();
     return ret;
   }
@@ -222,12 +305,23 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   terark_forceinline Slice GetValue(const Entry& e) const {
     return e.GetValue(m_trie.mem_get(0));
   }
+  terark_forceinline Slice GetValue(const KeyValueToLogRef& e) const {
+    return e.GetValue(this);
+  }
   ROCKSDB_FLATTEN
   void Get(const ReadOptions& ro, const LookupKey& k, void* callback_args,
            bool(*callback_func)(void*, const KeyValuePair&)) final {
     if (UNLIKELY(m_is_empty)) {
       return;
     }
+    if (m_ref_to_wal)
+      return GetTpl<KeyValueToLogRef>(ro, k, callback_args, callback_func);
+    else
+      return GetTpl<Entry>(ro, k, callback_args, callback_func);
+  }
+  template<class Entry>
+  void GetTpl(const ReadOptions& ro, const LookupKey& k, void* callback_args,
+              bool(*callback_func)(void*, const KeyValuePair&)) {
     KeyValuePair key_val(ExtractUserKey(k.internal_key()));
     auto token = reader_token();
     token->acquire(&m_trie);
@@ -263,6 +357,14 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   }
   Status SST_Get(const ReadOptions& ro,  const Slice& ikey,
                  GetContext* get_context) const {
+    if (m_ref_to_wal)
+      return SST_GetTpl<KeyValueToLogRef>(ro, ikey, get_context);
+    else
+      return SST_GetTpl<Entry>(ro, ikey, get_context);
+  }
+  template<class Entry>
+  Status SST_GetTpl(const ReadOptions& ro,  const Slice& ikey,
+                    GetContext* get_context) const {
     ROCKSDB_ASSERT_GE(ikey.size(), kNumInternalBytes);
     ParsedInternalKey pikey(ikey);
     Status st;
@@ -309,6 +411,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
 #endif
   bool NeedsUserKeyCompareInGet() const final { return false; }
   MemTableRep::Iterator* GetIterator(Arena*) final;
+  template<class EntryType>
   struct Iter;
   static size_t EncValueLen(size_t raw_val_len) {
     if (raw_val_len)
@@ -318,6 +421,31 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   }
   void ToWebViewJson(json&, const json& dump_options) const;
 };
+void CSPPMemTab::Token::SetKeyValueToLogRef(KeyValueToLogRef* entry) {
+  entry->tag = tag_;
+  if (0 == val_.size()) { // Delete/SingleDelete/...
+    memset(entry->value, 0, sizeof(entry->value)+1);
+    return;
+  }
+  ROCKSDB_VERIFY_EQ(val_.size(), sizeof(KeyValuePassMemTable));
+  auto kv_pmt = (const KeyValuePassMemTable*)(val_.data_);
+  auto valsize = kv_pmt->value.size_;
+  if (valsize <= sizeof(entry->value)) { // save inline
+    static_assert(sizeof(entry->value) % 4 == 3);
+    memset(entry->value, 0, sizeof(entry->value)+1);
+    memcpy(entry->value, kv_pmt->value.data_, valsize);
+    entry->inline_val_len = valsize;
+  } else {
+    auto mtab = (CSPPMemTab*)((char*)(m_trie) - offsetof(CSPPMemTab, m_trie));
+    mtab->add_wal(kv_pmt->fileno, valsize, kv_pmt->wal_file);
+    entry->fileno = kv_pmt->fileno;
+    entry->key_pos = kv_pmt->key_pos;
+    entry->val_pos = kv_pmt->val_pos;
+    entry->key_len = kv_pmt->key_len;
+    entry->val_len = valsize;
+    entry->inline_val_len = 255; // as a flag
+  }
+}
 bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
   TERARK_ASSERT_EQ(valsize, sizeof(uint32_t));
   auto trie = static_cast<MainPatricia*>(m_trie);
@@ -325,6 +453,18 @@ bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
   // 2. one memory block can be free'ed partially, we using this feature here
   static_assert(Align == 4); // now it must be 4
   static_assert(sizeof(VecPin) % Align == 0);
+  auto mtab = (CSPPMemTab*)((char*)(trie) - offsetof(CSPPMemTab, m_trie));
+  if (mtab->m_ref_to_wal) {
+    size_t vec_pin_pos = trie->mem_alloc(sizeof(VecPin) + sizeof(KeyValueToLogRef));
+    TERARK_VERIFY_NE(vec_pin_pos, MainPatricia::mem_alloc_fail);
+    auto vec_pin = (VecPin*)(trie->mem_get(vec_pin_pos));
+    SetKeyValueToLogRef((KeyValueToLogRef*)(vec_pin + 1));
+    vec_pin->pos = (uint32_t)(vec_pin_pos + (sizeof(VecPin) / Align));
+    vec_pin->cap = 1;
+    vec_pin->num = 1;
+    *(uint32_t*)trie_valptr = (uint32_t)vec_pin_pos;
+    return true;
+  }
   size_t enc_val_len = EncValueLen(val_.size());
   size_t vec_pin_pos = trie->mem_alloc(sizeof(VecPin) + sizeof(Entry) + enc_val_len);
   TERARK_VERIFY_NE(vec_pin_pos, MainPatricia::mem_alloc_fail);
@@ -352,6 +492,12 @@ void CSPPMemTab::Token::destroy_value(void* trie_valptr, size_t valsize) noexcep
   TERARK_ASSERT_EQ(valsize, sizeof(uint32_t));
   auto trie = static_cast<MainPatricia*>(m_trie);
   size_t vec_pin_pos = *(const uint32_t*)trie_valptr;
+  auto mtab = (CSPPMemTab*)((char*)(trie) - offsetof(CSPPMemTab, m_trie));
+  if (mtab->m_ref_to_wal) {
+    size_t mem_block_len = sizeof(VecPin) + sizeof(KeyValueToLogRef);
+    trie->mem_free(vec_pin_pos, mem_block_len); // free right now, not lazy free
+    return;
+  }
   size_t enc_val_len = EncValueLen(val_.size());
   size_t mem_block_len = sizeof(VecPin) + sizeof(Entry) + enc_val_len;
   trie->mem_free(vec_pin_pos, mem_block_len); // free right now, not lazy free
@@ -383,6 +529,47 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
   TERARK_ASSERT_GT(num, 0);
   TERARK_ASSERT_LE(num, old_cap);
   const auto entry_old_pos = vec_pin->pos;
+  auto mtab = (CSPPMemTab*)((char*)(trie) - offsetof(CSPPMemTab, m_trie));
+  if (mtab->m_ref_to_wal) {
+    const auto entry_old = (KeyValueToLogRef*)trie->mem_get(entry_old_pos);
+    const uint64_t curr_seq = tag_ >> 8;
+    const uint64_t last_seq = entry_old[num-1].tag >> 8;
+    if (UNLIKELY(curr_seq == last_seq)) {
+      as_atomic(vec_pin->num).store(num, std::memory_order_release);
+      return false; // duplicate internal_key(user_key, tag)
+    }
+    trie->mem_gc(this); // on many dup, gc is needed to revoke lazy free'ed mem
+    maximize(max_dup_len, num + 1);
+    if (num < old_cap && last_seq < curr_seq) {
+      SetKeyValueToLogRef(&entry_old[num]);
+      // this atomic store also clears LOCK_FLAG
+      as_atomic(vec_pin->num).store(num + 1, std::memory_order_release);
+      return true;
+    }
+    if (1 == num) {
+      num_dup_user_keys++;
+    }
+    uint32_t new_cap = num == old_cap ? old_cap * 2 : old_cap;
+    size_t entry_cow_pos = trie->mem_alloc(sizeof(KeyValueToLogRef) * new_cap);
+    TERARK_VERIFY_NE(entry_cow_pos, MainPatricia::mem_alloc_fail);
+    auto entry_cow = (KeyValueToLogRef*)trie->mem_get(entry_cow_pos);
+    if (LIKELY(last_seq < curr_seq)) {
+      memcpy(entry_cow, entry_old, sizeof(KeyValueToLogRef) * num);
+      SetKeyValueToLogRef(&entry_cow[num]);
+    } else {
+      auto idx = lower_bound_0(entry_old, num, tag_);
+      memcpy(entry_cow, entry_old, sizeof(KeyValueToLogRef) * idx);
+      SetKeyValueToLogRef(&entry_cow[idx]);
+      memcpy(entry_cow + idx+1, entry_old + idx, sizeof(KeyValueToLogRef)*(num-idx));
+    }
+    vec_pin->pos = (uint32_t)entry_cow_pos; // not need atomic
+    vec_pin->cap = new_cap;                 // not need atomic
+    // this memory_order_release makes all previous write visiable to other CPUs
+    // vec_pin->num.store also clears LOCK_FLAG
+    as_atomic(vec_pin->num).store(num + 1, std::memory_order_release);
+    trie->mem_lazy_free(entry_old_pos, sizeof(KeyValueToLogRef) * num, this);
+    return true;
+  }
   const auto entry_old = (Entry*)trie->mem_get(entry_old_pos);
   const uint64_t curr_seq = tag_ >> 8;
   const uint64_t last_seq = entry_old[num-1].tag >> 8;
@@ -433,6 +620,7 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
   trie->mem_lazy_free(entry_old_pos, sizeof(Entry) * num, this);
   return true;
 }
+template<class Entry>
 struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
   Patricia::Iterator* m_iter;
  #if defined(_MSC_VER) || defined(__clang__)
@@ -494,7 +682,10 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     TERARK_ASSERT_GE(m_idx, 0);
     auto mempool = m_mempool;
     auto entry = (const Entry*)(mempool + Align * m_vec_pin->pos);
-    return entry[m_idx].GetValue(mempool);
+    if constexpr (std::is_same_v<Entry, KeyValueToLogRef>)
+      return entry[m_idx].GetValue(m_tab);
+    else
+      return entry[m_idx].GetValue(mempool);
   }
   std::pair<Slice, Slice>
   GetKeyValue() const final { return {key(), value()}; }
@@ -948,6 +1139,10 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
 void CSPPMemTab::OnDupUserKeyYield() {
   as_atomic(m_fac->num_dup_yields).fetch_add(1, std::memory_order_relaxed);
 }
+template<class Iter>
+static MemTableRep::Iterator* MakeIter(CSPPMemTab* tab, Arena* a) {
+  return a ? new(a->AllocateAligned(sizeof(Iter))) Iter(tab) : new Iter(tab);
+}
 MemTableRep::Iterator* CSPPMemTab::GetIterator(Arena* a) {
 #if 0
   if (m_is_sst) {
@@ -960,15 +1155,20 @@ MemTableRep::Iterator* CSPPMemTab::GetIterator(Arena* a) {
   as_atomic(m_fac->live_iter_num).fetch_add(1, std::memory_order_relaxed);
   as_atomic(m_cumu_iter_num).fetch_add(1, std::memory_order_relaxed);
   as_atomic(m_live_iter_num).fetch_add(1, std::memory_order_relaxed);
-  return a ? new(a->AllocateAligned(sizeof(Iter))) Iter(this) : new Iter(this);
+  if (m_ref_to_wal)
+    return MakeIter<Iter<KeyValueToLogRef> >(this, a);
+  else
+    return MakeIter<Iter<Entry> >(this, a);
 }
-CSPPMemTab::Iter::Iter(CSPPMemTab* tab) {
+template<class Entry>
+CSPPMemTab::Iter<Entry>::Iter(CSPPMemTab* tab) {
   m_tab = tab;
   m_rev = tab->m_rev;
   m_iter = nullptr;
   m_mempool = (const char*)tab->m_trie.mem_get(0);
 }
-CSPPMemTab::Iter::~Iter() noexcept {
+template<class Entry>
+CSPPMemTab::Iter<Entry>::~Iter() noexcept {
   if (m_iter) {
     m_iter->dispose();
   }
@@ -1007,6 +1207,7 @@ inline void CSPPMemTab::init(bool rev, Logger* log, CSPPMemTabFactory* f) {
   m_read_by_writer_token = f->read_by_writer_token;
   m_token_use_idle = f->token_use_idle;
   m_accurate_memsize = f->accurate_memsize;
+  m_ref_to_wal = false;
   f->m_mtx.lock();
   f->live_num++;
   m_next = &f->m_head; // insert 'this' at linked list tail
@@ -1145,6 +1346,7 @@ const {
   uint32_t vec_pin_pos = m_trie.value_of<uint32_t>(token);
   auto vec_pin = (CSPPMemTab::VecPin*)m_trie.mem_get(vec_pin_pos);
   auto entry = (CSPPMemTab::Entry*)m_trie.mem_get(vec_pin->pos);
+  // entry[0].tag is at same pos for Entry & KeyValueToLogRef, no need changes
   std::string ikey;
   ikey.reserve(user_key.size() + 8);
   ikey.append(user_key.data(), user_key.size());
