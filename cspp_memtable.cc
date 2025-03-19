@@ -17,6 +17,7 @@
 #endif
 #include <terark/fsa/cspptrie.inl>
 #include <terark/num_to_str.hpp>
+#include <terark/util/mmap.hpp>
 #include <terark/util/vm_util.hpp>
 
 #if defined(OS_LINUX)
@@ -1529,6 +1530,23 @@ try {
   builder.properties_.num_merge_operands = meta->num_merges;
   builder.properties_.raw_key_size = meta->raw_key_size;
   builder.properties_.raw_value_size = meta->raw_value_size;
+  auto& oss = static_cast<string_appender<>&>(builder.properties_.compression_options);
+  oss.clear();
+  BlobFileAddition blob_file_addition;
+  for (size_t i = 0; m_wals[i].wal; i++) {
+    auto& e = m_wals[i];
+    auto blob_no = tbo.generate_file_no();
+    auto walname = LogFileName(ioptions.wal_dir, e.fileno);
+    auto refname = BlobFileName(ioptions.cf_paths[0].path, blob_no);
+    IOStatus ios = fs->LinkFile(walname, refname, fopt.io_options, &dbg_ctx);
+    if (!ios.ok())
+      return ios;
+    oss|blob_no|":"|e.fileno|":"|e.cnt|",";
+    tbo.add_blob_file({blob_no, e.cnt, e.bytes, "", ""});
+  }
+  if (!oss.empty()) {
+    oss.pop_back();
+  }
   Status s = builder.Finish();
   if (!s.ok()) {
     return s;
@@ -1696,8 +1714,26 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
   as_atomic(memtab_fac->num_dup_user_keys)
    .fetch_add(m_memtab->num_dup_user_keys, std::memory_order_relaxed);
 
+  std::vector<std::string> refwalnames;
+  fstring(table_properties_->compression_options).split(",", &refwalnames);
+  for (size_t i = 0; i < refwalnames.size(); i++) {
+    auto& e = refwalnames[i];
+    size_t blob_no = 0, wal_no = 0, cnt = 0;
+    int fields = sscanf(e.c_str(), "%zd:%zd:%zd", &blob_no, &wal_no, &cnt);
+    if (3 != fields) {
+      THROW_STD(logic_error, "refwalname must be blob_no:wal_no:cnt, but is: %s", e.c_str());
+    }
+    auto fpath = BlobFileName(tro.ioptions.cf_paths[0].path, blob_no);
+    auto [fmap, ios] = ReadonlyFileMmap::New(*tro.ioptions.fs, blob_no, fpath);
+    TERARK_VERIFY_S(ios.ok(), "ReadonlyFileMmap %s, %s", fpath, ios.ToString());
+    m_memtab->m_wals[i].fileno = blob_no;
+    m_memtab->m_wals[i].cnt = cnt;
+    m_memtab->m_wals[i].wal = fmap.get();
+    m_memtab->m_hold_wals.push_back(fmap);
+  }
+
   table_properties_->compression_name = "CSPPMemTab";
-  table_properties_->compression_options.clear();
+  table_properties_->compression_options.append(";");
   as_string_appender(table_properties_->compression_options)
     | "Free = "|SizeToString(m_memtab->m_trie.mem_frag_size());
   as_string_appender(table_properties_->compression_options)
