@@ -70,9 +70,9 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   bool          m_read_by_writer_token;
   bool          m_token_use_idle;
   bool          m_accurate_memsize;
-  bool          m_rev;
-  bool          m_is_flushed = false;
-  bool          m_is_empty = true;
+  bool          m_rev : 1;
+  bool          m_is_flushed : 1;
+  bool          m_is_empty : 1;
   bool          m_is_sst : 1;
   bool          m_has_converted_to_sst : 1;
   bool          m_has_marked_readonly : 1; // pre C++20 can not init on define
@@ -1000,6 +1000,8 @@ inline void CSPPMemTab::init(bool rev, Logger* log, CSPPMemTabFactory* f) {
   m_fac = f;
   m_log = log;
   m_rev = rev;
+  m_is_flushed = false;
+  m_is_empty = true;
   m_has_converted_to_sst = false;
   m_has_marked_readonly = false;
   m_read_by_writer_token = f->read_by_writer_token;
