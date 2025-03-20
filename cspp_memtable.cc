@@ -273,6 +273,10 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   }
   Status ConvertToSST(FileMetaData*, const TableBuilderOptions&) final;
   size_t ApproximateMemoryUsage() final {
+    size_t walsize = 0;
+    for (size_t i = 0; m_wals[i].cnt; i++) {
+      walsize += m_wals[i].bytes + m_wals[i].cnt * 4;
+    }
 #if defined(ROCKSDB_UNIT_TEST)
     size_t free_sz;
     if (m_trie.is_readonly()) {
@@ -309,9 +313,9 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       // read recent mem size again from mem_size_inline
       maximize(m_mem_size, m_trie.mem_size_inline());
     }
-    return m_mem_size;
+    return m_mem_size + walsize;
 #else
-    return m_trie.mem_size_inline();
+    return m_trie.mem_size_inline() + walsize;
 #endif
   }
   uint64_t ApproximateNumEntries(const Slice&, const Slice&) final;
