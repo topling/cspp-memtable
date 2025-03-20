@@ -65,14 +65,13 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     uint64_t tag;
     union {
       struct {
-        uint64_t key_pos; // to wal
         uint64_t val_pos; // to wal
         uint64_t fileno;
         uint32_t val_len;
         uint32_t key_len : 24; // Little Endian
         uint32_t inline_val_len : 8;
       };
-      char value[31];
+      char value[23];
     };
     Slice GetValue(const CSPPMemTab* mtab) const noexcept {
       if (inline_val_len <= sizeof(value)) {
@@ -83,7 +82,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       return {base + val_pos, val_len};
     }
   };
-  static_assert(sizeof(KeyValueToLogRef) == 40);
+  static_assert(sizeof(KeyValueToLogRef) == 32);
 #pragma pack(pop)
   static void encode_pre(Slice d, void* buf) {
     assert(d.size_ > 0); // empty `d` will not call this function
@@ -439,7 +438,6 @@ void CSPPMemTab::Token::SetKeyValueToLogRef(KeyValueToLogRef* entry) {
     auto mtab = (CSPPMemTab*)((char*)(m_trie) - offsetof(CSPPMemTab, m_trie));
     mtab->add_wal(kv_pmt->fileno, valsize, kv_pmt->wal_file);
     entry->fileno = kv_pmt->fileno;
-    entry->key_pos = kv_pmt->key_pos;
     entry->val_pos = kv_pmt->val_pos;
     entry->key_len = kv_pmt->key_len;
     entry->val_len = valsize;
