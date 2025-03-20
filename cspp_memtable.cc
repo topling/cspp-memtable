@@ -55,6 +55,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
         return Slice();
       }
     }
+    void DebugCheckUserKey(const CSPPMemTab*, Slice) const {}
   };
   struct VecPin { // once allocated, never realloc
     uint32_t num;
@@ -81,6 +82,19 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       auto wal = mtab->find_wal(fileno);
       auto base = wal->data_;
       return {base + val_pos, val_len};
+    }
+    void DebugCheckUserKey(const CSPPMemTab* mtab, Slice uk) const {
+     #if !defined(NDEBUG)
+      if (inline_val_len <= sizeof(value)) {
+        return;
+      }
+      auto wal = mtab->find_wal(fileno);
+      auto base = wal->data_;
+      auto val_lenlen = VarintLength(val_len);
+      ROCKSDB_ASSERT_EQ(uk.size_, key_len);
+      Slice wal_uk(base + val_pos - val_lenlen - key_len, key_len);
+      assert(uk == wal_uk);
+     #endif
     }
   };
   static_assert(sizeof(KeyValueToLogRef) == 32);
@@ -336,6 +350,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     intptr_t idx = upper_bound_0(entry, num, find_tag);
     if (UNLIKELY(ro.just_check_key_exists)) {
       while (idx--) {
+        entry[idx].DebugCheckUserKey(this, k.user_key());
         uint64_t tag = entry[idx].tag;
         if ((tag & 255) == kTypeMerge) {
           // instruct get_context to stop earlier
@@ -347,6 +362,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       }
     }
     else while (idx--) {
+      entry[idx].DebugCheckUserKey(this, k.user_key());
       key_val.tag = entry[idx].tag;
       key_val.value = GetValue(entry[idx]);
       if (!callback_func(callback_args, key_val))
@@ -374,6 +390,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     intptr_t idx = upper_bound_0(entry, num, find_tag);
     if (ro.just_check_key_exists) {
       while (idx--) {
+        entry[idx].DebugCheckUserKey(this, pikey.user_key);
         uint64_t tag = entry[idx].tag;
         UnPackSequenceAndType(tag, &pikey.sequence, &pikey.type);
         if (pikey.type == kTypeMerge) {
@@ -386,6 +403,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       }
     }
     else while (idx--) {
+      entry[idx].DebugCheckUserKey(this, pikey.user_key);
       uint64_t tag = entry[idx].tag;
       UnPackSequenceAndType(tag, &pikey.sequence, &pikey.type);
       Slice value = GetValue(entry[idx]);
@@ -669,6 +687,7 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     TERARK_ASSERT_GE(m_idx, 0);
     auto mempool = m_mempool;
     auto entry = (const Entry*)(mempool + Align * m_vec_pin->pos);
+    entry[m_idx].DebugCheckUserKey(m_tab, user_key());
     if constexpr (std::is_same_v<Entry, KeyValueToLogRef>)
       return entry[m_idx].GetValue(m_tab);
     else
