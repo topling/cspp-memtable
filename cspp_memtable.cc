@@ -436,10 +436,14 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   void ToWebViewJson(json&, const json& dump_options) const;
 };
 void CSPPMemTab::Token::SetKeyValueToLogRef(KeyValueToLogRef* entry) {
+  entry->tag = tag_;
+  if (0 == val_.size()) { // Delete/SingleDelete/...
+    memset(entry->value, 0, sizeof(entry->value)+1);
+    return;
+  }
   ROCKSDB_VERIFY_EQ(val_.size(), sizeof(KeyValuePassMemTable));
   auto kv_pmt = (const KeyValuePassMemTable*)(val_.data_);
   auto valsize = kv_pmt->value.size_;
-  entry->tag = tag_;
   if (valsize <= sizeof(entry->value)) { // save inline
     static_assert(sizeof(entry->value) % 4 == 3);
     memset(entry->value, 0, sizeof(entry->value)+1);
