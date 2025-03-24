@@ -273,6 +273,10 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   }
   Status ConvertToSST(FileMetaData*, const TableBuilderOptions&) final;
   size_t ApproximateMemoryUsage() final {
+    size_t walsize = 0;
+    for (size_t i = 0; i < m_num_wals; i++) {
+      walsize += m_wals[i].bytes;
+    }
 #if defined(ROCKSDB_UNIT_TEST)
     size_t free_sz;
     if (m_trie.is_readonly()) {
@@ -309,9 +313,9 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       // read recent mem size again from mem_size_inline
       maximize(m_mem_size, m_trie.mem_size_inline());
     }
-    return m_mem_size;
+    return m_mem_size + walsize;
 #else
-    return m_trie.mem_size_inline();
+    return m_trie.mem_size_inline() + walsize;
 #endif
   }
   uint64_t ApproximateNumEntries(const Slice&, const Slice&) final;
@@ -1696,7 +1700,11 @@ public:
     double  end_rank = m_memtab->m_trie.dfa_approximate_rank(end_uk);
     return fabs(end_rank - beg_rank) * file_data_.size_;
   }
-  size_t ApproximateMemoryUsage() const final { return file_data_.size(); }
+  size_t ApproximateMemoryUsage() const final {
+    // a little larger than CSPPMemTable::ApproximateMemoryUsage(), because
+    // file_data_.size() include the SST file footer and gdic_size is walsize
+    return file_data_.size() + table_properties_->gdic_size;
+  }
   Status Get(const ReadOptions& ro, const Slice& ikey, GetContext* get_context,
              const SliceTransform*, bool/*skip_filters*/) final {
     return m_memtab->SST_Get(ro, ikey, get_context);
