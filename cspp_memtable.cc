@@ -66,13 +66,12 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     uint64_t tag;
     union {
       struct {
-        uint64_t val_pos; // to wal
-        uint64_t fileno;
+        uint32_t fileno;
         uint32_t val_len;
-        uint32_t key_len : 24; // Little Endian
-        uint32_t inline_val_len : 8;
+        uint64_t val_pos : 56; // to wal
+        uint64_t inline_val_len : 8;
       };
-      char value[23];
+      char value[15];
     };
     Slice GetValue(const CSPPMemTab* mtab) const noexcept {
       if (inline_val_len <= sizeof(value)) {
@@ -90,13 +89,12 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       auto wal = mtab->find_wal(fileno);
       auto base = wal->data_;
       auto val_lenlen = VarintLength(val_len);
-      ROCKSDB_ASSERT_EQ(uk.size_, key_len);
-      Slice wal_uk(base + val_pos - val_lenlen - key_len, key_len);
+      Slice wal_uk(base + val_pos - val_lenlen - uk.size_, uk.size_);
       assert(uk == wal_uk);
      #endif
     }
   };
-  static_assert(sizeof(KeyValueToLogRef) == 32);
+  static_assert(sizeof(KeyValueToLogRef) == 24);
 #pragma pack(pop)
   static void encode_pre(Slice d, void* buf) {
     assert(d.size_ > 0); // empty `d` will not call this function
@@ -136,13 +134,13 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   LogFileLookup m_wals[MAX_WALS] = {};
   std::vector<std::shared_ptr<ReadonlyFileMmap> > m_hold_wals; // just hold
   std::mutex m_mtx;
-  const ReadonlyFileMmap* find_wal(size_t fileno) const {
+  const ReadonlyFileMmap* find_wal(uint32_t fileno) const {
     assert(0 != fileno);
     for (size_t i = 0; i < m_num_wals; i++) {
       if (m_wals[i].fileno == fileno)
         return m_wals[i].wal;
     }
-    ROCKSDB_DIE("not found fileno %zd", fileno);
+    ROCKSDB_DIE("not found fileno %zd", size_t(fileno));
     return nullptr;
   }
   void add_wal(size_t fileno, size_t bytes, const ReadonlyFileMmap* wal) {
@@ -461,7 +459,6 @@ void CSPPMemTab::Token::SetKeyValueToLogRef(KeyValueToLogRef* entry) {
     mtab->add_wal(kv_pmt->fileno, valsize, kv_pmt->wal_file);
     entry->fileno = kv_pmt->fileno;
     entry->val_pos = kv_pmt->val_pos;
-    entry->key_len = kv_pmt->key_len;
     entry->val_len = valsize;
     entry->inline_val_len = 255; // as a flag
   }
