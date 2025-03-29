@@ -196,22 +196,25 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     bool insert_for_dup_user_key(CSPPMemTab*);
   };
   void OnDupUserKeyYield();
-  bool insert_kv(fstring ikey, const Slice& val, Token*);
-  bool InsertKeyValueConcurrently(const Slice& ikey, const Slice& val) final {
+  bool insert_kv(fstring ukey, Token*);
+  bool InsertKeyValueConcurrently(uint64_t tag, const Slice& ukey, const Slice& val)
+  final {
     if (UNLIKELY(m_is_empty)) { // must check, avoid write as possible
       m_is_empty = false;
     }
     Token* token = m_trie.tls_writer_token_nn<Token>();
     token->acquire(&m_trie);
-    auto ret = insert_kv(ikey, val, token);
+    token->tag_ = tag;
+    token->val_ = val;
+    auto ret = insert_kv(ukey, token);
     m_token_use_idle ? token->idle() : token->release();
     return ret;
   }
-  bool InsertKeyValue(const Slice& k, const Slice& v) final {
-    return InsertKeyValueConcurrently(k, v);
+  bool InsertKeyValue(uint64_t tag, const Slice& k, const Slice& v) final {
+    return InsertKeyValueConcurrently(tag, k, v);
   }
-  bool InsertKeyValueWithHintConcurrently(const Slice& k, const Slice& v,
-                                          void** hint) final {
+  bool InsertKeyValueWithHintConcurrently
+  (uint64_t tag, const Slice& ukey, const Slice& val, void** hint) final {
     if (UNLIKELY(m_is_empty)) { // must check, avoid write as possible
       m_is_empty = false;
     }
@@ -225,11 +228,13 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       token = m_trie.tls_writer_token_nn<Token>();
       token->acquire(&m_trie);
     }
-    return insert_kv(k, v, token);
+    token->tag_ = tag;
+    token->val_ = val;
+    return insert_kv(ukey, token);
   }
-  bool InsertKeyValueWithHint(const Slice& k, const Slice& v, void** hint)
+  bool InsertKeyValueWithHint(uint64_t tag, const Slice& k, const Slice& v, void** hint)
   final {
-    return InsertKeyValueWithHintConcurrently(k, v, hint);
+    return InsertKeyValueWithHintConcurrently(tag, k, v, hint);
   }
   void FinishHint(void* hint) final {
     if (nullptr != hint) {
@@ -520,10 +525,7 @@ void CSPPMemTab::Token::destroy_value(void* trie_valptr, size_t valsize) noexcep
   trie->mem_free(vec_pin_pos, mem_block_len); // free right now, not lazy free
 }
 terark_forceinline
-bool CSPPMemTab::insert_kv(fstring ikey, const Slice& val, Token* tok) {
-  fstring user_key(ikey.data(), ikey.size() - 8);
-  tok->tag_ = DecodeFixed64(user_key.end());
-  tok->val_ = val;
+bool CSPPMemTab::insert_kv(fstring user_key, Token* tok) {
   uint32_t value_storage = UINT32_MAX;
   if (LIKELY(m_trie.insert(user_key, &value_storage, tok))) {
     TERARK_VERIFY_S(tok->has_value(), "OOM: mem_cap=%zd is too small: %s",
