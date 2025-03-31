@@ -24,6 +24,9 @@
   #include <linux/version.h>
 #endif
 
+//#include <filesystem>
+#include <dirent.h> // to be fast
+
 const char* git_version_hash_info_cspp_memtable();
 namespace terark {
 TERARK_DLL_EXPORT void CSPP_SetDebugLevel(long level); // defined in cspptrie.cpp
@@ -236,11 +239,9 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   final {
     return InsertKeyValueWithHintConcurrently(tag, k, v, hint);
   }
-  void FinishHint(void* hint) final {
-    if (nullptr != hint) {
-      auto token = (Token*)hint;
-      m_token_use_idle ? token->idle() : token->release();
-    }
+  void FinishHint(void* hint, WALReadyInfo wal) final {
+    auto token = (Token*)hint;
+    m_token_use_idle ? token->idle() : token->release();
   }
   inline Patricia::TokenBase* reader_token() const {
     if (m_read_by_writer_token)
@@ -887,6 +888,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   ConvertKind convert_to_sst = ConvertKind::kDontConvert;
   std::string chroot_dir; // default empty
   size_t chunk_size = huge_2m;
+  size_t next_instance_id = 1;
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
   size_t max_dup_len = 1;
@@ -895,6 +897,46 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   uint64_t deactived_mem_sum = 0;
   MemTabLinkListNode m_head;
   mutable std::mutex m_mtx;
+  std::set<std::string> m_scanned_dir;
+  mutable std::mutex m_scanned_dir_mtx;
+  size_t GenerateSSTableInstanceId() {
+    std::scoped_lock<std::mutex> lk(m_scanned_dir_mtx);
+    cumu_num++;
+    return next_instance_id++;
+  }
+  size_t GenerateMemTableInstanceId(const std::string& level0_dir, Logger* logger) {
+    std::scoped_lock<std::mutex> lk(m_scanned_dir_mtx);
+    cumu_num++;
+    if (!m_scanned_dir.insert(level0_dir).second) {
+      // existed: this dir has been scanned, not need to scan again
+      return next_instance_id++;
+    }
+    // direct use opendir + readdir + closedir is the fastest way
+    std::string dirpath = chroot_dir + level0_dir;
+    DIR* dp = opendir(dirpath.c_str());
+    if (!dp) {
+      ROCKS_LOG_WARN(logger, "opendir(%s) = %m", dirpath.c_str());
+      return next_instance_id++;
+    }
+    size_t max_file_num = next_instance_id;
+    while (dirent* ent = readdir(dp)) {
+      const char* fname = ent->d_name;
+      if (memcmp(fname, "cspp-", 5) != 0) {
+        continue;
+      }
+      size_t cf_file_id, cf_id;
+      int fields = sscanf(fname, "cspp-%zu.memtab-%zu", &cf_file_id, &cf_id);
+      if (fields == 2) {
+        max_file_num = std::max(max_file_num, cf_file_id);
+      } else {
+        ROCKS_LOG_WARN(logger, "%s/%s does not match cspp-%%zd.memtab-%%zd",
+                       dirpath.c_str(), fname);
+      }
+    }
+    closedir(dp);
+    next_instance_id = std::max(next_instance_id, max_file_num + 1);
+    return next_instance_id++;
+  }
   CSPPMemTabFactory(const json& js, const SidePluginRepo& r) {
     m_head.m_next = m_head.m_prev = &m_head;
     ROCKSDB_JSON_OPT_PROP(js, chroot_dir); // immutable
@@ -903,11 +945,13 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator& cmp,
                                  Allocator* a, const SliceTransform* s,
                                  Logger* logger) final {
+    TERARK_ASSERT_NE(ConvertKind::kFileMmap, convert_to_sst);
     return CreateMemTableRep("", MutableCFOptions(), cmp, a, s, logger, 0);
   }
   MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator& cmp,
                                  Allocator* a, const SliceTransform* s,
                                  Logger* logger, uint32_t cf_id) final {
+    TERARK_ASSERT_NE(ConvertKind::kFileMmap, convert_to_sst);
     return CreateMemTableRep("", MutableCFOptions(), cmp, a, s, logger, cf_id);
   }
   MemTableRep* CreateMemTableRep(const std::string& level0_dir,
@@ -923,7 +967,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     auto curr_chunk_size = this->chunk_size;
     auto curr_use_hugepage = this->use_hugepage;
     auto curr_convert_to_sst = this->convert_to_sst;
-    auto curr_num = as_atomic(cumu_num).fetch_add(1, std::memory_order_relaxed);
+    auto curr_num = GenerateMemTableInstanceId(level0_dir, logger);
     terark::string_appender<> conf(valvec_reserve(), 512);
     conf|"?chunk_size="|curr_chunk_size;
     if (ConvertKind::kFileMmap == curr_convert_to_sst) {
@@ -1141,6 +1185,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_SIZE(djs, active_used_mem);
     ROCKSDB_JSON_SET_SIZE(djs, live_used_mem);
     ROCKSDB_JSON_SET_PROP(djs, live_num);
+    ROCKSDB_JSON_SET_PROP(djs, next_instance_id);
     ROCKSDB_JSON_SET_PROP(djs, token_qlen);
     ROCKSDB_JSON_SET_PROP(djs, total_raw_iter);
     djs["comment"] = "(idx, qlen, raw_iter_num) | "
@@ -1735,8 +1780,7 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
     const CSPPMemTabTableFactory* f) {
   LoadCommonPart(file, tro, file_data, kCSPPMemTabMagic);
   auto memtab_fac = f->memtable_factory.get();
-  auto curr_num = as_atomic(memtab_fac->cumu_num)
-                 .fetch_add(1, std::memory_order_relaxed);
+  auto curr_num = memtab_fac->GenerateSSTableInstanceId();
   m_memtab.reset(new CSPPMemTab(isReverseBytewiseOrder_, tro.ioptions.logger,
                                 memtab_fac, curr_num));
   m_memtab->m_trie.self_mmap_user_mem(file_data);
