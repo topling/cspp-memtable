@@ -1758,6 +1758,9 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
     for (size_t i = 0; true; i++) {
       size_t blob_no = 0, wal_no = 0, cnt = 0, bytes = 0;
       int fields = sscanf(item, "%zd:%zd:%zd:%zd", &blob_no, &wal_no, &cnt, &bytes);
+      if (fields <= 0) {
+        break; // treat as end of list
+      }
       ROCKSDB_ASSERT_EQ(fields, 4);
       if (4 != fields) {
         THROW_STD(logic_error, "must be blob_no:wal_no:cnt:bytes, but is: %s", item);
