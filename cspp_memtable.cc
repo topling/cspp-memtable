@@ -1642,6 +1642,7 @@ public:
   }
   std::string GetPrintableOptions() const final {
     json djs = memtable_factory->ToJson({});
+    ROCKSDB_JSON_SET_PROP(djs, populate_read);
     return djs.dump();
   }
   Status ValidateOptions(const DBOptions&, const ColumnFamilyOptions&)
@@ -1650,13 +1651,16 @@ public:
   }
   bool IsDeleteRangeSupported() const override { return true; }
   void Update(const json& q, const json& js, const SidePluginRepo& repo) {
+    ROCKSDB_JSON_OPT_PROP(js, populate_read);
     memtable_factory->Update(q, js, repo);
   }
   std::string ToString(const json& d, const SidePluginRepo& repo) const {
     json djs = memtable_factory->ToJson(d);
+    ROCKSDB_JSON_SET_PROP(djs, populate_read);
     return JsonToString(djs, d);
   }
   std::shared_ptr<CSPPMemTabFactory> memtable_factory;
+  bool populate_read = true;
 };
 class CSPPMemTabTableReader : public TopTableReaderBase {
 public:
@@ -1768,6 +1772,24 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
       auto fpath = BlobFileName(tro.ioptions.cf_paths[0].path, blob_no);
       auto [fmap, ios] = ReadonlyFileMmap::New(*tro.ioptions.fs, blob_no, fpath);
       TERARK_VERIFY_S(ios.ok(), "ReadonlyFileMmap %s, %s", fpath, ios.ToString());
+     #ifdef __linux__
+      if (f->populate_read && g_linux_kernel_version >= KERNEL_VERSION(5,14,0)) {
+        auto logger = tro.ioptions.logger;
+        auto madv_populate_read = 22; // MADV_POPULATE_READ = 22
+        auto mem = (void*)fmap->data();
+        auto len = fmap->size();
+        auto t0 = std::chrono::steady_clock::now();
+        if (madvise(mem, len, madv_populate_read) < 0) {
+          ROCKS_LOG_WARN(logger, "MADV_POPULATE_READ(%s, %zd) = %m",
+                         fpath.c_str(), len);
+        }
+        auto t1 = std::chrono::steady_clock::now();
+        using namespace std::chrono;
+        ROCKS_LOG_DEBUG(logger, "MADV_POPULATE_READ(%s, %zd) = %.6f ms",
+                        fpath.c_str(), len,
+                        duration_cast<nanoseconds>(t1-t0).count()/1e6);
+      }
+     #endif
       m_memtab->m_wals[i].fileno = wal_no;
       m_memtab->m_wals[i].cnt = cnt;
       m_memtab->m_wals[i].wal = fmap.get();
@@ -1831,14 +1853,18 @@ Status CSPPMemTabTableFactory::NewTableReader(
               bool prefetch_index_and_filter)
 const try {
   (void)prefetch_index_and_filter; // now ignore
-  file->exchange(new MmapReadWrapper(file));
+  file->exchange(new MmapReadWrapper(file, populate_read));
   Slice file_data;
   Status s = TopMmapReadAll(*file, file_size, &file_data);
   if (!s.ok()) {
     return s;
   }
-  MmapAdvSeq(file_data);
-  MmapWarmUp(file_data);
+  if (populate_read) {
+    // has populated in `new MmapReadWrapper`
+  } else { // not populated, do madvise
+    MmapAdvSeq(file_data);
+    MmapWarmUp(file_data);
+  }
   table->reset(new CSPPMemTabTableReader(file.release(), file_data, tro, this));
   return Status::OK();
 }
