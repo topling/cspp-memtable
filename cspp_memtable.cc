@@ -1826,6 +1826,15 @@ CSPPMemTabTableReader::~CSPPMemTabTableReader() {
   TERARK_VERIFY_EZ(m_memtab->m_live_iter_num);
   m_memtab.reset(nullptr); // explicit delete
 }
+static std::string StrPercent(size_t num, size_t denom) {
+  if (denom == 0) {
+    return "INF%";
+  }
+  double percent =  100.0 * num  / denom;
+  string_appender<> oss;
+  oss^"%.2f%%"^percent;
+  return oss.str();
+}
 std::string
 CSPPMemTabTableReader::ToWebViewString(const json& dump_options) const {
   json djs;
@@ -1833,6 +1842,96 @@ CSPPMemTabTableReader::ToWebViewString(const json& dump_options) const {
   djs["num_deletions"] = table_properties_->num_deletions;
   djs["num_merge_operands"] = table_properties_->num_merge_operands;
   djs["num_range_deletions"] = table_properties_->num_range_deletions;
+  auto& tp = *table_properties_;
+ #define SetSize(prop) djs[#prop] = SizeToString(tp.prop)
+ #define SetProp(prop) djs[#prop] = tp.prop
+  SetSize(raw_key_size);
+  SetSize(raw_value_size);
+  SetSize(index_size);
+  SetSize(data_size);
+  SetSize(tag_size);
+  SetSize(gdic_size);
+  size_t trie_mem_size = m_memtab->m_trie.mem_size_inline();
+  size_t garbage_size = m_memtab->m_trie.mem_frag_size();
+  size_t kv_size = tp.raw_key_size + tp.raw_value_size;
+  double num_entries = tp.num_entries;
+  // tag_size avg is always 8 bytes per entry
+  djs["raw_key_size_avg"] = 1.0 * tp.raw_key_size / num_entries;
+  djs["raw_value_size_avg"] = 1.0 * tp.raw_value_size / num_entries;
+  djs["raw_key_size_ratio"] = StrPercent(tp.raw_key_size, kv_size);
+  djs["raw_tag_size_ratio"] = StrPercent(tp.tag_size, kv_size);
+  djs["raw_value_size_ratio"] = StrPercent(tp.raw_value_size, kv_size);
+
+  djs["index_size_avg"] = 1.0 * tp.index_size / num_entries;
+  djs["data_size_avg"] = 1.0 * tp.data_size / num_entries;
+  djs["index_size_ratio"] = StrPercent(tp.index_size, trie_mem_size);
+  djs["data_size_ratio"] = StrPercent(tp.data_size, trie_mem_size);
+  djs["tag_size_ratio"] = StrPercent(tp.tag_size, trie_mem_size);
+
+  ROCKSDB_JSON_SET_SIZE(djs, trie_mem_size);
+  ROCKSDB_JSON_SET_SIZE(djs, garbage_size);
+  djs["garbage_ratio"] = StrPercent(garbage_size, trie_mem_size);
+  djs["garbage_per_entry"] = 1.0 * garbage_size / num_entries;
+
+  json& ref_to_wal = djs["ref_to_wal"];
+  if (m_memtab->m_num_wals) {
+    size_t sum_ref_cnt = 0, sum_ref_size = 0, sum_file_size = 0;
+    for (size_t i = 0; i < m_memtab->m_num_wals; i++) {
+      auto& e = m_memtab->m_wals[i];
+      sum_ref_cnt += e.cnt;
+      sum_ref_size += e.bytes;
+      sum_file_size += e.wal->size();
+      json blobjs;
+      blobjs["blob_file"] = m_memtab->m_hold_wals[i]->fileno;
+      blobjs["wal_file"] = e.fileno;
+      blobjs["ref_cnt"] = e.cnt;
+      blobjs["ref_size"] = SizeToString(e.bytes);
+      blobjs["ref_avg"] = e.bytes / double(e.cnt);
+      blobjs["file_size"] = SizeToString(e.wal->size());
+      blobjs["ref_ratio"] = StrPercent(e.bytes, e.wal->size());
+      ref_to_wal.push_back(std::move(blobjs));
+    }
+    if (m_memtab->m_num_wals > 1) {
+      ref_to_wal.push_back(json::object({
+        {"blob_file", "sum"},
+        {"wal_file", "sum"},
+        {"ref_cnt", sum_ref_cnt},
+        {"ref_size", SizeToString(sum_ref_size)},
+        {"ref_avg", sum_ref_size / double(sum_ref_cnt)},
+        {"file_size", SizeToString(sum_file_size)},
+        {"ref_ratio", StrPercent(sum_ref_size, sum_file_size)},
+      }));
+    }
+    ref_to_wal[0]["<htmltab:col>"] = json::array({
+      "blob_file",
+      "wal_file",
+      "ref_cnt",
+      "ref_size",
+      "ref_avg",
+      "file_size",
+      "ref_ratio",
+    });
+    djs["ref_cnt_ratio"] = StrPercent(sum_ref_cnt, tp.num_entries);
+    size_t inline_cnt = tp.num_entries - sum_ref_cnt;
+    ROCKSDB_JSON_SET_PROP(djs, inline_cnt);
+    djs["trie_plus_wal_mem"] = SizeToString(trie_mem_size + sum_ref_size);
+    djs["trie_plus_wal_file"] = SizeToString(file_data_.size_ + sum_file_size);
+    djs["trie_mem_ratio"] = StrPercent(trie_mem_size, trie_mem_size + sum_ref_size);
+    djs["trie_file_ratio"] = StrPercent(file_data_.size_, file_data_.size_ + sum_file_size);
+  #if 0
+    // inline info can not be calculated in this way, because raw_value_size
+    // is sizeof(KeyValueToLogRef)
+    size_t inline_size = tp.raw_value_size - sum_ref_size;
+    auto   inline_ratio = StrPercent(inline_size, tp.raw_value_size);
+    double inline_avg = inline_size / double(inline_cnt);
+    ROCKSDB_JSON_SET_SIZE(djs, inline_size);
+    ROCKSDB_JSON_SET_PROP(djs, inline_ratio);
+    ROCKSDB_JSON_SET_PROP(djs, inline_avg);
+  #endif
+    djs["refwal_avg"] = sum_ref_size / double(sum_ref_cnt);
+  } else {
+    djs["ref_to_wal"] = bool(m_memtab->m_ref_to_wal);
+  }
   m_memtab->ToWebViewJson(djs, dump_options);
   return JsonToString(djs, dump_options);
 }
