@@ -468,7 +468,7 @@ void CSPPMemTab::Token::SetKeyValueToLogRef(KeyValueToLogRef* entry) {
     auto& x = m_wal_cnt_bytes[fidx];
     x.cnt++;
     x.bytes += valsize;
-    size_t THREAD_LOCAL_THRESHOLD = 512 * 1024;
+    size_t THREAD_LOCAL_THRESHOLD = TERARK_IF_DEBUG(1, 512 * 1024);
     size_t approximate_inc_bytes = x.cnt * sizeof(KeyValueToLogRef) + x.bytes;
     if (UNLIKELY(approximate_inc_bytes > THREAD_LOCAL_THRESHOLD)) {
       as_atomic(mtab->m_wals[fidx].cnt).fetch_add(x.cnt, std::memory_order_relaxed);
