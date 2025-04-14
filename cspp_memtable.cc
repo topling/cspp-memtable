@@ -1812,8 +1812,19 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
   as_string_appender(table_properties_->compression_options)
     ^ ", %.2f%%" ^ 100.0*m_memtab->m_trie.mem_frag_size()/file_data_.size();
 
-  table_properties_->tag_size = 8 * table_properties_->num_entries;
-  table_properties_->data_size = table_properties_->raw_value_size;
+  size_t num_entries = table_properties_->num_entries;
+  size_t num_user_keys = m_memtab->m_trie.num_words();
+  table_properties_->tag_size = 8 * num_entries;
+  if (m_memtab->m_ref_to_wal) {
+    table_properties_->data_size = // no raw_value_size which is in wal
+      (sizeof(CSPPMemTab::VecPin) + sizeof(uint32_t)) * num_user_keys +
+      (sizeof(CSPPMemTab::KeyValueToLogRef) - sizeof(uint64_t)) * num_entries;
+  }
+  else {
+    table_properties_->data_size = table_properties_->raw_value_size +
+      (sizeof(CSPPMemTab::VecPin) + sizeof(uint32_t)) * num_user_keys +
+      (sizeof(CSPPMemTab::KeyValueToLogRef) - sizeof(uint64_t)) * num_entries;
+  }
   table_properties_->index_size = m_memtab->m_trie.mem_size_inline() -
                                   m_memtab->m_trie.mem_frag_size() -
                                   table_properties_->data_size -
