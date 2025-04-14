@@ -144,15 +144,13 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     ROCKSDB_DIE("not found fileno %zd", size_t(fileno));
     return nullptr;
   }
-  void add_wal(size_t fileno, size_t bytes, const ReadonlyFileMmap* wal) {
+  size_t add_wal(size_t fileno, const ReadonlyFileMmap* wal) {
     assert(0 != fileno);
     size_t i = 0;
     while (i < m_num_wals) {
       if (m_wals[i].fileno == fileno) {
         TERARK_VERIFY_EQ(m_wals[i].wal, wal);
-        m_wals[i].cnt++;
-        m_wals[i].bytes += bytes;
-        return;
+        return i;
       }
       i++;
     }
@@ -160,19 +158,18 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     while (i < m_num_wals) {
       if (m_wals[i].fileno == fileno) {
         TERARK_VERIFY_EQ(m_wals[i].wal, wal);
-        m_wals[i].cnt++;
-        m_wals[i].bytes += bytes;
-        return;
+        return i;
       }
       i++;
     }
     TERARK_VERIFY_LT(m_num_wals, MAX_WALS);
-    m_wals[i].cnt = 1;
+    m_wals[i].cnt = 0;
     m_wals[i].wal = wal;
-    m_wals[i].bytes = bytes;
+    m_wals[i].bytes = 0;
     m_wals[i].fileno = uint32_t(fileno);
     as_atomic(m_num_wals).fetch_add(1); // update last
     m_hold_wals.emplace_back(((ReadonlyFileMmap*)wal)->shared_from_this());
+    return i;
   }
   CSPPMemTab(intptr_t cap, bool rev, Logger*, CSPPMemTabFactory*,
              size_t instance_idx, ConvertKind, fstring fpath_or_conf);
@@ -185,11 +182,16 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   bool SupportMemTableAsLogIndex() const final { return m_ref_to_wal; }
   KeyHandle Allocate(const size_t, char**) final { TERARK_DIE("Bad call"); }
   void Insert(KeyHandle) final { TERARK_DIE("Bad call"); }
+  struct LogFileCntBytesThreadLocal {
+    uint32_t cnt = 0;
+    uint64_t bytes = 0;
+  };
   struct Token : public Patricia::WriterToken {
     uint64_t tag_ = UINT64_MAX;
     Slice val_;
     size_t max_dup_len = 1;
     size_t num_dup_user_keys = 0;
+    LogFileCntBytesThreadLocal m_wal_cnt_bytes[MAX_WALS] = {};
     ~Token();
     void SetKeyValueToLogRef(KeyValueToLogRef*);
     bool init_value(void* trie_valptr, size_t trie_valsize) noexcept final;
@@ -462,7 +464,17 @@ void CSPPMemTab::Token::SetKeyValueToLogRef(KeyValueToLogRef* entry) {
     entry->inline_val_len = valsize;
   } else {
     auto mtab = (CSPPMemTab*)((char*)(m_trie) - offsetof(CSPPMemTab, m_trie));
-    mtab->add_wal(kv_pmt->fileno, valsize, kv_pmt->wal_file);
+    auto fidx = mtab->add_wal(kv_pmt->fileno, kv_pmt->wal_file);
+    auto& x = m_wal_cnt_bytes[fidx];
+    x.cnt++;
+    x.bytes += valsize;
+    size_t THREAD_LOCAL_THRESHOLD = 512 * 1024;
+    size_t approximate_inc_bytes = x.cnt * sizeof(KeyValueToLogRef) + x.bytes;
+    if (UNLIKELY(approximate_inc_bytes > THREAD_LOCAL_THRESHOLD)) {
+      as_atomic(mtab->m_wals[fidx].cnt).fetch_add(x.cnt, std::memory_order_relaxed);
+      as_atomic(mtab->m_wals[fidx].bytes).fetch_add(x.bytes, std::memory_order_relaxed);
+      x = {}; // reset
+    }
     entry->fileno = kv_pmt->fileno;
     entry->val_pos = kv_pmt->val_pos;
     entry->val_len = valsize;
@@ -1283,6 +1295,11 @@ void CSPPMemTab::ConvertToReadOnly(const char* caller, fstring sst_name) {
         maximize(this->max_dup_len, wtok->max_dup_len);
         this->num_dup_user_keys += wtok->num_dup_user_keys;
         wtok->num_dup_user_keys = 0;
+      }
+      for (size_t i = 0; i < this->m_num_wals; ++i) {
+        this->m_wals[i].cnt += wtok->m_wal_cnt_bytes[i].cnt;
+        this->m_wals[i].bytes += wtok->m_wal_cnt_bytes[i].bytes;
+        wtok->m_wal_cnt_bytes[i] = {}; // reset
       }
     }
   });
