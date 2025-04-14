@@ -18,6 +18,7 @@
 #include <terark/fsa/cspptrie.inl>
 #include <terark/num_to_str.hpp>
 #include <terark/util/vm_util.hpp>
+#include <float.h>
 
 #if defined(OS_LINUX)
   #include <linux/mman.h>
@@ -1846,43 +1847,61 @@ static std::string StrPercent(size_t num, size_t denom) {
   oss^"%.2f%%"^percent;
   return oss.str();
 }
+static std::string SizeToStringFixedLen(size_t size) {
+  std::string str = SizeToString(size);
+  if (str.size() < 12) {
+    str.insert(0, 12 - str.size(), ' ');
+  }
+  return str;
+}
+auto vertical_rule = R"( <div id="vertical-rule"></div> )";
+static std::string SizeAvgPercent(size_t size, size_t cnt, size_t denom, const char* comment = "") {
+  //auto vertical_rule = " │ "; // longer than "|"
+  //auto vertical_rule = R"( <div style="border-left:1px solid;height:2em;display:inline-block;margin-top:-0.3em;margin-bottom:-0.6em"></div> )";
+  string_appender<> oss;
+  oss|"<pre>";
+  oss|SizeToStringFixedLen(size);
+  oss|vertical_rule;
+  oss^"%9.2f"^double(size)/(cnt+FLT_EPSILON);
+  oss|vertical_rule;
+  oss^"%6.2f%%"^100.0*size/(denom+FLT_EPSILON);
+  oss|"  of "|SizeToStringFixedLen(denom)|comment;
+  oss|"</pre>";
+  return std::move(oss.str());
+}
+static std::string CntPercent(size_t cnt, size_t denom, const char* comment = "") {
+  string_appender<> oss;
+  oss|"<pre>";
+  oss^"%9zd"^cnt;
+  oss|vertical_rule;
+  oss^"%6.2f%%"^100.0*cnt/(denom+FLT_EPSILON);
+  oss^"  of %9zd"^denom;
+  oss|comment;
+  oss|"</pre>";
+  return std::move(oss.str());
+}
 std::string
 CSPPMemTabTableReader::ToWebViewString(const json& dump_options) const {
   json djs;
+  size_t num_user_keys = m_memtab->m_trie.num_words();
+  djs["num_user_keys"] = num_user_keys;
   djs["num_entries"] = table_properties_->num_entries;
   djs["num_deletions"] = table_properties_->num_deletions;
   djs["num_merge_operands"] = table_properties_->num_merge_operands;
   djs["num_range_deletions"] = table_properties_->num_range_deletions;
   auto& tp = *table_properties_;
- #define SetSize(prop) djs[#prop] = SizeToString(tp.prop)
- #define SetProp(prop) djs[#prop] = tp.prop
-  SetSize(raw_key_size);
-  SetSize(raw_value_size);
-  SetSize(index_size);
-  SetSize(data_size);
-  SetSize(tag_size);
-  SetSize(gdic_size);
   size_t trie_mem_size = m_memtab->m_trie.mem_size_inline();
   size_t garbage_size = m_memtab->m_trie.mem_frag_size();
   size_t kv_size = tp.raw_key_size + tp.raw_value_size;
-  double num_entries = tp.num_entries;
-  // tag_size avg is always 8 bytes per entry
-  djs["raw_key_size_avg"] = 1.0 * tp.raw_key_size / num_entries;
-  djs["raw_value_size_avg"] = 1.0 * tp.raw_value_size / num_entries;
-  djs["raw_key_size_ratio"] = StrPercent(tp.raw_key_size, kv_size);
-  djs["raw_tag_size_ratio"] = StrPercent(tp.tag_size, kv_size);
-  djs["raw_value_size_ratio"] = StrPercent(tp.raw_value_size, kv_size);
-
-  djs["index_size_avg"] = 1.0 * tp.index_size / num_entries;
-  djs["data_size_avg"] = 1.0 * tp.data_size / num_entries;
-  djs["index_size_ratio"] = StrPercent(tp.index_size, trie_mem_size);
-  djs["data_size_ratio"] = StrPercent(tp.data_size, trie_mem_size);
-  djs["tag_size_ratio"] = StrPercent(tp.tag_size, trie_mem_size);
-
-  ROCKSDB_JSON_SET_SIZE(djs, trie_mem_size);
-  ROCKSDB_JSON_SET_SIZE(djs, garbage_size);
-  djs["garbage_ratio"] = StrPercent(garbage_size, trie_mem_size);
-  djs["garbage_per_entry"] = 1.0 * garbage_size / num_entries;
+  size_t num_entries = tp.num_entries;
+  djs["raw_key_size"] = SizeAvgPercent(tp.raw_key_size, num_entries, kv_size, " (kv_size)");
+  djs["raw_value_size"] = SizeAvgPercent(tp.raw_value_size, num_entries, kv_size);
+  djs["kv_size"] = SizeAvgPercent(kv_size, num_entries, kv_size);
+  djs["tag_size"] = SizeAvgPercent(tp.tag_size, num_entries, trie_mem_size, " (trie mem)");
+  djs["index_size"] = SizeAvgPercent(tp.index_size, num_entries, trie_mem_size);
+  djs["data_size"] = SizeAvgPercent(tp.data_size, num_entries, trie_mem_size);
+  djs["garbage_size"] = SizeAvgPercent(garbage_size, num_entries, trie_mem_size);
+  djs["trie_mem_size"] = SizeAvgPercent(trie_mem_size, num_entries, trie_mem_size);
 
   json& ref_to_wal = djs["ref_to_wal"];
   if (m_memtab->m_num_wals) {
@@ -1922,24 +1941,25 @@ CSPPMemTabTableReader::ToWebViewString(const json& dump_options) const {
       "file_size",
       "ref_ratio",
     });
-    djs["ref_cnt_ratio"] = StrPercent(sum_ref_cnt, tp.num_entries);
-    size_t inline_cnt = tp.num_entries - sum_ref_cnt;
-    ROCKSDB_JSON_SET_PROP(djs, inline_cnt);
-    djs["trie_plus_wal_mem"] = SizeToString(trie_mem_size + sum_ref_size);
-    djs["trie_plus_wal_file"] = SizeToString(file_data_.size_ + sum_file_size);
-    djs["trie_mem_ratio"] = StrPercent(trie_mem_size, trie_mem_size + sum_ref_size);
-    djs["trie_file_ratio"] = StrPercent(file_data_.size_, file_data_.size_ + sum_file_size);
-  #if 0
-    // inline info can not be calculated in this way, because raw_value_size
-    // is sizeof(KeyValueToLogRef)
+    size_t inline_cnt = num_entries - sum_ref_cnt;
     size_t inline_size = tp.raw_value_size - sum_ref_size;
-    auto   inline_ratio = StrPercent(inline_size, tp.raw_value_size);
-    double inline_avg = inline_size / double(inline_cnt);
-    ROCKSDB_JSON_SET_SIZE(djs, inline_size);
-    ROCKSDB_JSON_SET_PROP(djs, inline_ratio);
-    ROCKSDB_JSON_SET_PROP(djs, inline_avg);
-  #endif
-    djs["refwal_avg"] = sum_ref_size / double(sum_ref_cnt);
+    size_t trie_file_size = file_data_.size_; // trie_mem_size + meta + footer
+    djs["refwal_cnt"] = CntPercent(sum_ref_cnt, num_entries, " (num_entries)");
+    djs["inline_cnt"] = CntPercent(inline_cnt, num_entries, " (num_entries)");
+    djs["inline_size"] = SizeAvgPercent(inline_size, inline_cnt, tp.raw_value_size, " (raw_value_size)");
+    djs["trie_plus_wal_mem"] = SizeToString(trie_mem_size + sum_ref_size);
+    djs["trie_plus_wal_file"] = SizeToString(trie_file_size + sum_file_size);
+    djs["trie_mem"] = SizeAvgPercent(trie_mem_size, num_entries, trie_mem_size + sum_ref_size, " (trie+wal mem)");
+    djs["trie_file"] = SizeAvgPercent(trie_file_size, num_entries, trie_file_size + sum_file_size, " (trie+wal file)");
+    // ref_ptr_unit does not count the 8 bytes of uint64 tag
+    size_t ref_ptr_unit = sizeof(CSPPMemTab::KeyValueToLogRef) - sizeof(uint64_t);
+    size_t vec_pin_size = sizeof(CSPPMemTab::VecPin) * num_user_keys;
+    size_t ref_ptr_size = ref_ptr_unit * num_entries;
+    size_t ref_overhead = sizeof(uint32_t) * num_user_keys + vec_pin_size + ref_ptr_size;
+    djs["vec_pin_size"] = SizeAvgPercent(vec_pin_size, num_entries, trie_mem_size, " (trie mem)");
+    djs["ref_ptr_size"] = SizeAvgPercent(ref_ptr_size, num_entries, trie_mem_size, " (trie mem)");
+    djs["ref_overhead"] = SizeAvgPercent(ref_overhead, num_entries, trie_mem_size, " (trie mem)");
+    // djs["refwal_avg"] = sum_ref_size / double(sum_ref_cnt); // has shown in "ref_to_wal"
   } else {
     djs["ref_to_wal"] = bool(m_memtab->m_ref_to_wal);
   }
@@ -1948,7 +1968,6 @@ CSPPMemTabTableReader::ToWebViewString(const json& dump_options) const {
 }
 void CSPPMemTab::ToWebViewJson(json& djs, const json& dump_options) const {
   const auto& fac = *m_fac;
-  djs["num_user_keys"] = m_trie.num_words();
   ROCKSDB_JSON_SET_PROP(djs, max_dup_len);
   ROCKSDB_JSON_SET_PROP(djs, num_dup_user_keys);
   ROCKSDB_JSON_SET_PROP(djs, fac.max_dup_len);
