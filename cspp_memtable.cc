@@ -125,8 +125,8 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   size_t   m_mem_size = 0;
 #endif
   struct LogFileLookup {
-    uint32_t fileno = 0;
-    uint32_t cnt = 0;
+    uint64_t fileno = 0;
+    uint64_t cnt = 0;
     uint64_t bytes = 0;
     const ReadonlyFileMmap* wal = 0;
   };
@@ -138,7 +138,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   const ReadonlyFileMmap* find_wal(uint32_t fileno) const {
     assert(0 != fileno);
     for (size_t i = 0; i < m_num_wals; i++) {
-      if (m_wals[i].fileno == fileno)
+      if (uint32_t(m_wals[i].fileno) == fileno)
         return m_wals[i].wal;
     }
     ROCKSDB_DIE("not found fileno %zd", size_t(fileno));
@@ -166,7 +166,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     m_wals[i].cnt = 0;
     m_wals[i].wal = wal;
     m_wals[i].bytes = 0;
-    m_wals[i].fileno = uint32_t(fileno);
+    m_wals[i].fileno = fileno;
     as_atomic(m_num_wals).fetch_add(1); // update last
     m_hold_wals.emplace_back(((ReadonlyFileMmap*)wal)->shared_from_this());
     return i;
@@ -183,7 +183,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   KeyHandle Allocate(const size_t, char**) final { TERARK_DIE("Bad call"); }
   void Insert(KeyHandle) final { TERARK_DIE("Bad call"); }
   struct LogFileCntBytesThreadLocal {
-    uint32_t cnt = 0;
+    uint64_t cnt = 0;
     uint64_t bytes = 0;
   };
   struct Token : public Patricia::WriterToken {
