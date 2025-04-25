@@ -77,7 +77,7 @@ MemTable 直接转化成 SST 代替了 MemTable Flush 操作，有巨大的收�
 
 * **kDontConvert**：禁用该功能，此为默认值。
 * **kDumpMem**：转化时将 MemTable 的整块内存写入 SST 文件，避免 CPU 消耗，但未降低内存消耗
-* **kFileMmap**：将 MemTable 内容 mmap 到文件，这是关键功能，同时降低 CPU 和内存消耗
+* **kFileMmap**：将 MemTable 内容 mmap 到文件，这是关键功能，同时降低 CPU 和内存消耗，可同时将 DBOptions.[memtable_as_log_index](#三memtable_as_log_index) 设为 true 从本质上消除 MemTable Flush。
 
 CSPPMemTab 创建时预分配的内存可以是文件 mmap，此时文件在创建时 truncate 到 mem_cap 尺寸，
 主流的文件系统(ext4,xfs,...)都支持稀疏文件，虽然 truncate 到 mem_cap 尺寸，虚拟内存也分配
@@ -149,7 +149,20 @@ CSPP 为了实现高性能的多线程并发插入，使用了 Copy On Write，�
 
 更好的方案是 MemTable 只存储索引，数据放在 WAL Log 中，参考 [Omit L0 Flush](https://github.com/topling/toplingdb/wiki/Omit-L0-Flush)，但是做到这一点工程量太大，需要修改的代码太多……
 
-## 三、memtablerep_bench
+## 三、memtable_as_log_index
+ToplingDB 已经实现了前面提到的改进计划 [Omit L0 Flush](https://github.com/topling/toplingdb/wiki/Omit-L0-Flush)(约 2025-03-20 日完成)，通过仔细的设计，修改的代码量很少，获得的收益很大。
+
+DBOptions.`memtable_as_log_index` 设为 true 表示将会在 MemTable 的支持下实现 [Omit L0 Flush](https://github.com/topling/toplingdb/wiki/Omit-L0-Flush)，为了支持该功能，ToplingDB 设计了新的 WAL 文件格式，与 RocksDB 的 WAL 格式完全不同。所以，**memtable_as_log_index** 为 true 和 false 时，WAL 文件的格式完全不同，且互不兼容，所以它是 ImmutableDBOptions，若要更改，不仅需要重新打开 DB，还要确保所有的 WAL 已经 Flush(ConvertToSST 的语义也是 Flush)。
+
+只有在 `convert_to_sst` 为 `kFileMmap` 时，该功能才会激活，因为它依赖于 ConvertToSST 功能，只能在 ConvertToSST 中实现。目前的实现方式是：
+
+在 TableProperties.compression_options 中增加 `LogIndex;blob_no:wal_no:cnt:bytes,...`，记录该 MemTable 引用的 WAL 文件，为了让 LSM 树感知文件引用关系，为引用的每个 WAL 文件创建一个 blob 文件硬链接，该 MemTable 转化成 SST 文件交给 LSM 树之后，LSM 树就认为该 SST 文件引用了相应的 blob 文件。之所以使用这样的方式实现文件引用关系，是因为 LSM 树没法知道 WAL 文件被 SST 引用，这样做开发成本最低。
+
+使用该功能时，MemTable 的存储格式也发生了变化，使用 `KeyValueToLogRef` 指向 Value 内容在 WAL 文件中的偏移，fileno 仅包含 64 位 WAL 文件编号的低 32 位，虽然文件编号会超过 32 位，但是同一个 MemTable 中的不同 WAL 的文件编号的低 32 位不可能相等，足以在该 MemTable 中区分不同的 WAL 文件，完整的 WAL 文件编号以文本形式存储在前述的 compression_options 中。
+
+`KeyValueToLogRef` 也使用了短数据优化，当 ValueLen ≤ 15 时，Value 的内容直接存储在 `KeyValueToLogRef` 结构体的前 15 字节中，此时最后一个字节表示 ValueLen，这种设计避免了小 Value 也要去访问 WAL 文件，当一个 MemTable 关联的某个 WAL 文件的所有 Value 都是短 Value 时，这个 WAL 就不需要被该 MemTable 引用了。
+
+## 四、memtablerep_bench
 ToplingDB 在 RocksDB 的 memtablerep_bench 中加入了 cspp，以下脚本对比 skiplist 和 cspp（linux 下必须保证设置了足够的 `vm.nr_hugepages`）
 > linux kernel 5.14 以上可以自动检测 vm.nr_hugepages 不足导致的失败，旧版内核在 vm.nr_hugepages 不足时会发生 segfault 或 bus error，
 > 将 "use_hugepage": `true` 改成 `false` 即可，代价是性能会有少许损失。
@@ -160,7 +173,7 @@ cd toplingdb
 make DEBUG_LEVEL=0 memtablerep_bench -j`nproc`
 export LD_LIBRARY_PATH=.:`find sideplugin -name lib_shared`:${LD_LIBRARY_PATH}
 ./memtablerep_bench -memtablerep=skiplist -huge_page_tlb_size=2097152 \
-  -benchmarks=fillrandom,readrandom,readwrite \  
+  -benchmarks=fillrandom,readrandom,readwrite \
   -write_buffer_size=536870912 -item_size=0 -num_operations=10000000
 ./memtablerep_bench -memtablerep='cspp:{"mem_cap":"16G","use_hugepage":true}' \
   -benchmarks=fillrandom,readrandom,readwrite \
