@@ -1841,7 +1841,8 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
   else {
     table_properties_->data_size = table_properties_->raw_value_size +
       (sizeof(CSPPMemTab::VecPin) + sizeof(uint32_t)) * num_user_keys +
-      (sizeof(CSPPMemTab::KeyValueToLogRef) - sizeof(uint64_t)) * num_entries;
+      (sizeof(CSPPMemTab::Entry) + 1 - sizeof(uint64_t)) * num_entries;
+      // for varint encoded value ^^^ len, this is less than real usage
   }
   table_properties_->index_size = m_memtab->m_trie.mem_size_inline() -
                                   m_memtab->m_trie.mem_frag_size() -
