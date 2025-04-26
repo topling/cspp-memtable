@@ -67,18 +67,19 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     uint64_t tag;
     union {
       struct {
-        uint32_t fileno;
         uint32_t val_len;
-        uint64_t val_pos : 56; // to wal
+        uint64_t val_pos : 48; // to wal
+        uint64_t wal_idx :  8;
         uint64_t inline_val_len : 8;
       };
-      char value[15];
+      char value[11];
     };
     Slice GetValue(const CSPPMemTab* mtab) const noexcept {
       if (inline_val_len <= sizeof(value)) {
         return {value, inline_val_len};
       }
-      auto wal = mtab->find_wal(fileno);
+      ROCKSDB_ASSERT_LT(wal_idx, mtab->m_num_wals);
+      auto wal = mtab->m_wals[wal_idx].wal;
       auto base = wal->data_;
       return {base + val_pos, val_len};
     }
@@ -87,7 +88,8 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       if (inline_val_len <= sizeof(value)) {
         return;
       }
-      auto wal = mtab->find_wal(fileno);
+      ROCKSDB_ASSERT_LT(wal_idx, mtab->m_num_wals);
+      auto wal = mtab->m_wals[wal_idx].wal;
       auto base = wal->data_;
       auto val_lenlen = VarintLength(val_len);
       Slice wal_uk(base + val_pos - val_lenlen - uk.size_, uk.size_);
@@ -95,7 +97,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
      #endif
     }
   };
-  static_assert(sizeof(KeyValueToLogRef) == 24);
+  static_assert(sizeof(KeyValueToLogRef) == 20);
 #pragma pack(pop)
   static void encode_pre(Slice d, void* buf) {
     assert(d.size_ > 0); // empty `d` will not call this function
@@ -135,15 +137,6 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   LogFileLookup m_wals[MAX_WALS] = {};
   std::vector<std::shared_ptr<ReadonlyFileMmap> > m_hold_wals; // just hold
   std::mutex m_mtx;
-  const ReadonlyFileMmap* find_wal(uint32_t fileno) const {
-    assert(0 != fileno);
-    for (size_t i = 0; i < m_num_wals; i++) {
-      if (uint32_t(m_wals[i].fileno) == fileno)
-        return m_wals[i].wal;
-    }
-    ROCKSDB_DIE("not found fileno %zd", size_t(fileno));
-    return nullptr;
-  }
   size_t add_wal(size_t fileno, const ReadonlyFileMmap* wal) {
     assert(0 != fileno);
     size_t i = 0;
@@ -475,7 +468,7 @@ void CSPPMemTab::Token::SetKeyValueToLogRef(KeyValueToLogRef* entry) {
       as_atomic(mtab->m_wals[fidx].bytes).fetch_add(x.bytes, std::memory_order_relaxed);
       x = {}; // reset
     }
-    entry->fileno = kv_pmt->fileno;
+    entry->wal_idx = fidx;
     entry->val_pos = kv_pmt->val_pos;
     entry->val_len = valsize;
     entry->inline_val_len = 255; // as a flag

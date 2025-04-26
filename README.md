@@ -158,9 +158,9 @@ DBOptions.`memtable_as_log_index` 设为 true 表示将会在 MemTable 的支持
 
 在 TableProperties.compression_options 中增加 `LogIndex;blob_no:wal_no:cnt:bytes,...`，记录该 MemTable 引用的 WAL 文件，为了让 LSM 树感知文件引用关系，为引用的每个 WAL 文件创建一个 blob 文件硬链接，该 MemTable 转化成 SST 文件交给 LSM 树之后，LSM 树就认为该 SST 文件引用了相应的 blob 文件。之所以使用这样的方式实现文件引用关系，是因为 LSM 树没法知道 WAL 文件被 SST 引用，这样做开发成本最低。
 
-使用该功能时，MemTable 的存储格式也发生了变化，使用 `KeyValueToLogRef` 指向 Value 内容在 WAL 文件中的偏移，fileno 仅包含 64 位 WAL 文件编号的低 32 位，虽然文件编号会超过 32 位，但是同一个 MemTable 中的不同 WAL 的文件编号的低 32 位不可能相等，足以在该 MemTable 中区分不同的 WAL 文件，完整的 WAL 文件编号以文本形式存储在前述的 compression_options 中。
+使用该功能时，MemTable 的存储格式也发生了变化，使用 `KeyValueToLogRef` 指向 Value 内容所在的 WAL 文件编号以及在该 WAL 文件中的偏移。WAL 文件编号以文本形式存储在前述的 compression_options 中。
 
-`KeyValueToLogRef` 也使用了短数据优化，当 ValueLen ≤ 15 时，Value 的内容直接存储在 `KeyValueToLogRef` 结构体的前 15 字节中，此时最后一个字节表示 ValueLen，这种设计避免了小 Value 也要去访问 WAL 文件，当一个 MemTable 关联的某个 WAL 文件的所有 Value 都是短 Value 时，这个 WAL 就不需要被该 MemTable 引用了。
+`KeyValueToLogRef` 也使用了短数据优化，当 ValueLen ≤ 11 时，Value 的内容直接存储在 `KeyValueToLogRef` 结构体中，此时最后一个字节表示 ValueLen，这种设计避免了小 Value 也要去访问 WAL 文件，当一个 MemTable 关联的某个 WAL 文件的所有 Value 都是短 Value 时，这个 WAL 就不需要被该 MemTable 引用了。
 
 ## 四、memtablerep_bench
 ToplingDB 在 RocksDB 的 memtablerep_bench 中加入了 cspp，以下脚本对比 skiplist 和 cspp（linux 下必须保证设置了足够的 `vm.nr_hugepages`）
