@@ -123,6 +123,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   size_t   num_dup_user_keys = 0;
   uint32_t m_cumu_iter_num = 0;
   uint32_t m_live_iter_num = 0;
+  uint64_t m_fill_time = 0;
 #if defined(ROCKSDB_UNIT_TEST)
   size_t   m_mem_size = 0;
 #endif
@@ -196,6 +197,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   bool InsertKeyValueConcurrently(uint64_t tag, const Slice& ukey, const Slice& val)
   final {
     if (UNLIKELY(m_is_empty)) { // must check, avoid write as possible
+      m_fill_time = Env::Default()->NowNanos();
       m_is_empty = false;
     }
     Token* token = m_trie.tls_writer_token_nn<Token>();
@@ -212,6 +214,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   bool InsertKeyValueWithHintConcurrently
   (uint64_t tag, const Slice& ukey, const Slice& val, void** hint) final {
     if (UNLIKELY(m_is_empty)) { // must check, avoid write as possible
+      m_fill_time = Env::Default()->NowNanos();
       m_is_empty = false;
     }
     // SkipListMemTable use `*hint` as last insertion position, We use `*hint`
@@ -1280,7 +1283,8 @@ CSPPMemTab::Token::~Token() {
 void CSPPMemTab::ConvertToReadOnly(const char* caller, fstring sst_name) {
   TERARK_VERIFY(!m_trie.is_readonly());
   auto clock = Env::Default()->GetSystemClock();
-  double t0 = clock->NowNanos();
+  auto t0 = clock->NowNanos();
+  m_fill_time = t0 - m_fill_time;
   m_trie.for_each_tls_token([&,this](Patricia::TokenBase* tok) {
     if (auto wtok = dynamic_cast<Token*>(tok)) {
       if (wtok->num_dup_user_keys) {
@@ -1300,12 +1304,13 @@ void CSPPMemTab::ConvertToReadOnly(const char* caller, fstring sst_name) {
     auto header = (DFA_MmapHeader*)(m_trie.get_mmap().data());
     header->reserve1[0] = max_dup_len; // persistent to mmap
     header->reserve1[1] = num_dup_user_keys;
+    header->reserve1[2] = m_fill_time;
   }
   atomic_maximize(m_fac->max_dup_len, max_dup_len, std::memory_order_relaxed);
   as_atomic(m_fac->num_dup_user_keys)
         .fetch_add(num_dup_user_keys, std::memory_order_relaxed);
   m_trie.set_readonly(); // set readonly is the last step
-  double tt1 = clock->NowNanos();
+  auto tt1 = clock->NowNanos();
   ROCKS_LOG_INFO(m_log,
     "%s ConvertToReadOnly %s in %s, mem_size = %8.3f M, time = %9.3f us",
     m_trie.mmap_fpath().c_str(), sst_name.c_str(), caller,
@@ -1760,6 +1765,7 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
   auto header = (DFA_MmapHeader*)(file_data.data());
   m_memtab->max_dup_len = header->reserve1[0];
   m_memtab->num_dup_user_keys = header->reserve1[1];
+  m_memtab->m_fill_time = header->reserve1[2];
   atomic_maximize(memtab_fac->max_dup_len,
                     m_memtab->max_dup_len, std::memory_order_relaxed);
   as_atomic(memtab_fac->num_dup_user_keys)
@@ -1905,6 +1911,15 @@ CSPPMemTabTableReader::ToWebViewString(const json& dump_options) const {
   size_t garbage_size = m_memtab->m_trie.mem_frag_size();
   size_t kv_size = tp.raw_key_size + tp.raw_value_size;
   size_t num_entries = tp.num_entries;
+  auto fill_time = m_memtab->m_fill_time;
+  terark::EmptyClass ends;
+  djs["performance"] = string_appender<>()
+    ^ "<pre>"
+    ^ "fill time %.6f sec" ^ fill_time/1e9 ^ vertical_rule
+    ^ "%.3f MB/s" ^ 1e3*kv_size/fill_time ^ vertical_rule
+    ^ "%.0f KV/s" ^ 1e9*tp.num_entries/fill_time ^ vertical_rule
+    ^ "</pre>"
+    ^ ends;
   djs["raw_key_size"] = SizeAvgPercent(tp.raw_key_size, num_entries, kv_size, " (kv_size)");
   djs["raw_value_size"] = SizeAvgPercent(tp.raw_value_size, num_entries, kv_size);
   djs["kv_size"] = SizeAvgPercent(kv_size, num_entries, kv_size);
