@@ -583,7 +583,12 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
       memcpy(entry_cow, entry_old, sizeof(KeyValueToLogRef) * num);
       SetKeyValueToLogRef(&entry_cow[num]);
     } else {
-      auto idx = lower_bound_0(entry_old, num, tag_);
+      auto idx = lower_bound_0(entry_old, num, curr_seq << 8);
+      if (UNLIKELY(entry_old[idx].tag >> 8 == curr_seq)) { // very rare
+        as_atomic(vec_pin->num).store(num, std::memory_order_release);
+        trie->mem_free(entry_cow_pos, sizeof(KeyValueToLogRef) * new_cap);
+        return false; // duplicate internal_key(user_key, tag)
+      }
       memcpy(entry_cow, entry_old, sizeof(KeyValueToLogRef) * idx);
       SetKeyValueToLogRef(&entry_cow[idx]);
       memcpy(entry_cow + idx+1, entry_old + idx, sizeof(KeyValueToLogRef)*(num-idx));
@@ -631,7 +636,16 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
     entry_cow[num].pos = (uint32_t)enc_val_pos;
     entry_cow[num].tag = tag_;
   } else {
-    auto idx = lower_bound_0(entry_old, num, tag_);
+    auto idx = lower_bound_0(entry_old, num, curr_seq << 8);
+    if (UNLIKELY(entry_old[idx].tag >> 8 == curr_seq)) { // very rare
+      as_atomic(vec_pin->num).store(num, std::memory_order_release);
+      trie->mem_free(entry_cow_pos, sizeof(Entry) * new_cap);
+      if (enc_val_pos) {
+        size_t enc_val_len = VarintLength(val_.size()) + val_.size();
+        trie->mem_free(enc_val_pos, enc_val_len);
+      }
+      return false; // duplicate internal_key(user_key, tag)
+    }
     memcpy(entry_cow, entry_old, sizeof(Entry) * idx);
     entry_cow[idx].pos = (uint32_t)enc_val_pos;
     entry_cow[idx].tag = tag_;
@@ -1267,13 +1281,20 @@ CSPPMemTab::~CSPPMemTab() noexcept {
 }
 CSPPMemTab::Token::~Token() {
   // sync Token stats to MemTab
+  auto trie = (MainPatricia*)(m_trie);
+  auto mtab = (CSPPMemTab*)((char*)(trie) - offsetof(CSPPMemTab, m_trie));
   if (num_dup_user_keys) {
-    auto trie = (MainPatricia*)(m_trie);
-    auto mtab = (CSPPMemTab*)((char*)(trie) - offsetof(CSPPMemTab, m_trie));
     atomic_maximize(mtab->max_dup_len, max_dup_len, std::memory_order_relaxed);
     as_atomic(mtab->num_dup_user_keys)
         .fetch_add(num_dup_user_keys, std::memory_order_relaxed);
     num_dup_user_keys = 0; // notify sync'ed
+  }
+  for (size_t i = 0; i < mtab->m_num_wals; ++i) {
+    assert(mtab->m_ref_to_wal);
+    auto& x = m_wal_cnt_bytes[i];
+    as_atomic(mtab->m_wals[i].cnt).fetch_add(x.cnt, std::memory_order_relaxed);
+    as_atomic(mtab->m_wals[i].bytes).fetch_add(x.bytes, std::memory_order_relaxed);
+    m_wal_cnt_bytes[i] = {}; // reset
   }
 }
 void CSPPMemTab::ConvertToReadOnly(const char* caller, fstring sst_name) {
