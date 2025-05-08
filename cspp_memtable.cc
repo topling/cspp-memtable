@@ -595,7 +595,7 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
     // this memory_order_release makes all previous write visiable to other CPUs
     // vec_pin->num.store also clears LOCK_FLAG
     as_atomic(vec_pin->num).store(num + 1, std::memory_order_release);
-    trie->mem_lazy_free(entry_old_pos, sizeof(KeyValueToLogRef) * num, this);
+    trie->mem_lazy_free(entry_old_pos, sizeof(KeyValueToLogRef) * old_cap, this);
     return true;
   }
   const auto entry_old = (Entry*)trie->mem_get(entry_old_pos);
@@ -645,7 +645,7 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
   // this memory_order_release makes all previous write visiable to other CPUs
   // vec_pin->num.store also clears LOCK_FLAG
   as_atomic(vec_pin->num).store(num + 1, std::memory_order_release);
-  trie->mem_lazy_free(entry_old_pos, sizeof(Entry) * num, this);
+  trie->mem_lazy_free(entry_old_pos, sizeof(Entry) * old_cap, this);
   return true;
 }
 template<class Entry>
