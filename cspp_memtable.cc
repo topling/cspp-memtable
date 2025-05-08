@@ -186,7 +186,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     size_t num_dup_user_keys = 0;
     LogFileCntBytesThreadLocal m_wal_cnt_bytes[MAX_WALS] = {};
     ~Token();
-    void SetKeyValueToLogRef(KeyValueToLogRef*);
+    void SetKeyValueToLogRef(CSPPMemTab*, KeyValueToLogRef*);
     bool init_value(void* trie_valptr, size_t trie_valsize) noexcept final;
     void destroy_value(void* valptr, size_t valsize) noexcept final;
     bool insert_for_dup_user_key(CSPPMemTab*);
@@ -443,7 +443,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   }
   void ToWebViewJson(json&, const json& dump_options) const;
 };
-void CSPPMemTab::Token::SetKeyValueToLogRef(KeyValueToLogRef* entry) {
+void CSPPMemTab::Token::SetKeyValueToLogRef(CSPPMemTab* mtab, KeyValueToLogRef* entry) {
   entry->tag = tag_;
   if (0 == val_.size()) { // Delete/SingleDelete/...
     memset(entry->value, 0, sizeof(entry->value)+1);
@@ -458,7 +458,6 @@ void CSPPMemTab::Token::SetKeyValueToLogRef(KeyValueToLogRef* entry) {
     memcpy(entry->value, kv_pmt->value.data_, valsize);
     entry->inline_val_len = valsize;
   } else {
-    auto mtab = (CSPPMemTab*)((char*)(m_trie) - offsetof(CSPPMemTab, m_trie));
     auto fidx = mtab->add_wal(kv_pmt->fileno, kv_pmt->wal_file);
     auto& x = m_wal_cnt_bytes[fidx];
     x.cnt++;
@@ -488,7 +487,7 @@ bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
     size_t vec_pin_pos = trie->mem_alloc(sizeof(VecPin) + sizeof(KeyValueToLogRef));
     TERARK_VERIFY_NE(vec_pin_pos, MainPatricia::mem_alloc_fail);
     auto vec_pin = (VecPin*)(trie->mem_get(vec_pin_pos));
-    SetKeyValueToLogRef((KeyValueToLogRef*)(vec_pin + 1));
+    SetKeyValueToLogRef(mtab, (KeyValueToLogRef*)(vec_pin + 1));
     vec_pin->pos = (uint32_t)(vec_pin_pos + (sizeof(VecPin) / Align));
     vec_pin->num = 1;
     *(uint32_t*)trie_valptr = (uint32_t)vec_pin_pos;
@@ -555,8 +554,7 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
   TERARK_ASSERT_GT(num, 0);
   TERARK_ASSERT_LE(num, old_cap);
   const auto entry_old_pos = vec_pin->pos;
-  auto mtab = (CSPPMemTab*)((char*)(trie) - offsetof(CSPPMemTab, m_trie));
-  if (mtab->m_ref_to_wal) {
+  if (tab->m_ref_to_wal) {
     const auto entry_old = (KeyValueToLogRef*)trie->mem_get(entry_old_pos);
     const uint64_t curr_seq = tag_ >> 8;
     const uint64_t last_seq = entry_old[num-1].tag >> 8;
@@ -566,7 +564,7 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
     }
     maximize(max_dup_len, num + 1);
     if (num < old_cap && last_seq < curr_seq) {
-      SetKeyValueToLogRef(&entry_old[num]);
+      SetKeyValueToLogRef(tab, &entry_old[num]);
       // this atomic store also clears LOCK_FLAG
       as_atomic(vec_pin->num).store(num + 1, std::memory_order_release);
       return true;
@@ -581,7 +579,7 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
     auto entry_cow = (KeyValueToLogRef*)trie->mem_get(entry_cow_pos);
     if (LIKELY(last_seq < curr_seq)) {
       memcpy(entry_cow, entry_old, sizeof(KeyValueToLogRef) * num);
-      SetKeyValueToLogRef(&entry_cow[num]);
+      SetKeyValueToLogRef(tab, &entry_cow[num]);
     } else {
       auto idx = lower_bound_0(entry_old, num, curr_seq << 8);
       if (UNLIKELY(entry_old[idx].tag >> 8 == curr_seq)) { // very rare
@@ -590,7 +588,7 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
         return false; // duplicate internal_key(user_key, tag)
       }
       memcpy(entry_cow, entry_old, sizeof(KeyValueToLogRef) * idx);
-      SetKeyValueToLogRef(&entry_cow[idx]);
+      SetKeyValueToLogRef(tab, &entry_cow[idx]);
       memcpy(entry_cow + idx+1, entry_old + idx, sizeof(KeyValueToLogRef)*(num-idx));
     }
     vec_pin->pos = (uint32_t)entry_cow_pos; // not need atomic
