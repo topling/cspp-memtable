@@ -566,7 +566,6 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
       as_atomic(vec_pin->num).store(num, std::memory_order_release);
       return false; // duplicate internal_key(user_key, tag)
     }
-    trie->mem_gc(this); // on many dup, gc is needed to revoke lazy free'ed mem
     maximize(max_dup_len, num + 1);
     if (num < old_cap && last_seq < curr_seq) {
       SetKeyValueToLogRef(&entry_old[num]);
@@ -577,6 +576,7 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
     if (1 == num) {
       num_dup_user_keys++;
     }
+    trie->mem_gc(this); // on many dup, gc is needed to revoke lazy free'ed mem
     uint32_t new_cap = num == old_cap ? old_cap * 2 : old_cap;
     size_t entry_cow_pos = trie->mem_alloc(sizeof(KeyValueToLogRef) * new_cap);
     TERARK_VERIFY_NE(entry_cow_pos, MainPatricia::mem_alloc_fail);
