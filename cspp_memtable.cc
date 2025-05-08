@@ -59,7 +59,6 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   };
   struct VecPin { // once allocated, never realloc
     uint32_t num;
-    uint32_t cap;
     uint32_t pos;
   };
   struct KeyValueToLogRef {
@@ -491,7 +490,6 @@ bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
     auto vec_pin = (VecPin*)(trie->mem_get(vec_pin_pos));
     SetKeyValueToLogRef((KeyValueToLogRef*)(vec_pin + 1));
     vec_pin->pos = (uint32_t)(vec_pin_pos + (sizeof(VecPin) / Align));
-    vec_pin->cap = 1;
     vec_pin->num = 1;
     *(uint32_t*)trie_valptr = (uint32_t)vec_pin_pos;
     return true;
@@ -504,7 +502,6 @@ bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
   auto entry = (Entry*)(vec_pin + 1);
   *(uint32_t*)trie_valptr = (uint32_t)vec_pin_pos;
   vec_pin->pos = (uint32_t)entry_pos;
-  vec_pin->cap = 1;
   vec_pin->num = 1;
   entry->tag = tag_;
   if (val_.size_) {
@@ -553,7 +550,8 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
     tab->OnDupUserKeyYield();
     std::this_thread::yield(); // has been locked by other threads, yield
   }
-  const uint32_t old_cap = vec_pin->cap;
+  // is power of 2 --------vvvvvvvvvvvvvvvv
+  const uint32_t old_cap = (num&(num-1))==0 ? num : 2u << terark_bsr_u32(num);
   TERARK_ASSERT_GT(num, 0);
   TERARK_ASSERT_LE(num, old_cap);
   const auto entry_old_pos = vec_pin->pos;
@@ -591,7 +589,6 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
       memcpy(entry_cow + idx+1, entry_old + idx, sizeof(KeyValueToLogRef)*(num-idx));
     }
     vec_pin->pos = (uint32_t)entry_cow_pos; // not need atomic
-    vec_pin->cap = new_cap;                 // not need atomic
     // this memory_order_release makes all previous write visiable to other CPUs
     // vec_pin->num.store also clears LOCK_FLAG
     as_atomic(vec_pin->num).store(num + 1, std::memory_order_release);
@@ -641,7 +638,6 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
     memcpy(entry_cow + idx+1, entry_old + idx, sizeof(Entry)*(num-idx));
   }
   vec_pin->pos = (uint32_t)entry_cow_pos; // not need atomic
-  vec_pin->cap = new_cap;                 // not need atomic
   // this memory_order_release makes all previous write visiable to other CPUs
   // vec_pin->num.store also clears LOCK_FLAG
   as_atomic(vec_pin->num).store(num + 1, std::memory_order_release);
