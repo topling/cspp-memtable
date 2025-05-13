@@ -169,9 +169,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   CSPPMemTab(bool rev, Logger*, CSPPMemTabFactory*, size_t instance_idx);
   void init(bool rev, Logger*, CSPPMemTabFactory*);
   ~CSPPMemTab() noexcept override;
-  void InitSetMemTableAsLogIndex(bool b) final {
-    m_ref_to_wal = b && SupportConvertToSST();
-  }
+  void InitSetMemTableAsLogIndex(bool b) final;
   bool SupportMemTableAsLogIndex() const final { return m_ref_to_wal; }
   KeyHandle Allocate(const size_t, char**) final { TERARK_DIE("Bad call"); }
   void Insert(KeyHandle) final { TERARK_DIE("Bad call"); }
@@ -474,6 +472,7 @@ void CSPPMemTab::Token::SetKeyValueToLogRef(CSPPMemTab* mtab, KeyValueToLogRef* 
     entry->val_len = valsize;
     entry->inline_val_len = 255; // as a flag
   }
+  TERARK_ASSERT_S_EQ(entry->GetValue(mtab), kv_pmt->value);
 }
 bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
   TERARK_ASSERT_EQ(valsize, sizeof(uint32_t));
@@ -719,10 +718,10 @@ struct CSPPMemTab::Iter : public MemTableRep::Iterator, boost::noncopyable {
     auto mempool = m_mempool;
     auto entry = (const Entry*)(mempool + Align * m_vec_pin->pos);
     entry[m_idx].DebugCheckUserKey(m_tab, user_key());
-    if constexpr (std::is_same_v<Entry, KeyValueToLogRef>)
-      return entry[m_idx].GetValue(m_tab);
-    else
+    if constexpr (std::is_same_v<Entry, CSPPMemTab::Entry>)
       return entry[m_idx].GetValue(mempool);
+    else
+      return entry[m_idx].GetValue(m_tab);
   }
   std::pair<Slice, Slice>
   GetKeyValue() const final { return {key(), value()}; }
@@ -1276,6 +1275,9 @@ CSPPMemTab::~CSPPMemTab() noexcept {
       std::remove(m_trie.mmap_fpath().c_str());
     }
   }
+}
+void CSPPMemTab::InitSetMemTableAsLogIndex(bool b) {
+  m_ref_to_wal = b && SupportConvertToSST();
 }
 CSPPMemTab::Token::~Token() {
   // sync Token stats to MemTab
