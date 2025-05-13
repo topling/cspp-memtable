@@ -10,6 +10,7 @@ mem_cap       |uint64|2G    |cspp 需要预分配足够的单块内存**地址�
 use_vm        |bool  |true  |使用 malloc/posix_memalign 时，地址空间可能是已经实际分配的，设置该选项会强制使用 mmap 分配内存，从而保证仅仅是**保留地址空间，但并不实际分配**
 use_hugepage  |bool  |false |使用该选项时，linux 下必须保证设置了足够的 `vm.nr_hugepages`
 vm_explicit_commit|bool  |false |Windows `VirtualAlloc` 需要显式 commit，linux 不需要，但是如果内存不足，访问虚存时会 SegFault/BusError，linux kernel 5.14+ 的 `MADV_POPULATE_WRITE` 可以起到 Windows 显式 commit 的类似效果
+ref_log_format|enum  |kShortLogRef|启用 memtable_as_log_index 时，如何引用 Log 数据，可选值<br>`{kNoLogRef, kPlainLogRef, kShortLogRef}`
 convert_to_sst|enum  |kDontConvert|直接将 MemTable **转化**为 SST，省去 Flush，可选值：<br>`{kDontConvert, kDumpMem, kFileMmap}`
 sync_sst_file |bool  |true  |convert_to_sst 为 `kFileMmap` 时，SST 转化完成后是否执行 fsync
 token_use_idle|bool  |true  |该选项用来优化 token ring，一般情况下使用默认值即可
@@ -72,6 +73,14 @@ MemTableRepFactory:
 
 ## 二、MemTable 直接转化成 SST
 MemTable 直接转化成 SST 代替了 MemTable Flush 操作，有巨大的收益，目前只有 CSPP MemTable 支持该功能。CSPP 可以直接在 ReadWrite 的文件 mmap 上操作，这是该功能得以有效实现的基础。
+
+`ref_log_format` 的三个枚举值：
+
+* **kNoLogRef**：禁用 log ref
+* **kPlainLogRef**：log ref 中包含 value length，SSO 最大长度为 11；读取 value 时仅返回指向 log mmap 中的 value 内容的指针，不碰 value 内存，仅做统计时有一点点优势
+* **kShortLogRef**：log ref 中不包含 value length，SSO 最大长度为 7；读取 value 时需要读取 log mmap 获得 value 长度，仅做统计时有一点点劣势
+
+当 memtable_as_log_index 为 false 时，`ref_log_format` 被忽略，当做 kNoLogRef 处理。
 
 `convert_to_sst` 的三个枚举值：
 
@@ -154,13 +163,17 @@ ToplingDB 已经实现了前面提到的改进计划 [Omit L0 Flush](https://git
 
 DBOptions.`memtable_as_log_index` 设为 true 表示将会在 MemTable 的支持下实现 [Omit L0 Flush](https://github.com/topling/toplingdb/wiki/Omit-L0-Flush)，为了支持该功能，ToplingDB 设计了新的 WAL 文件格式，与 RocksDB 的 WAL 格式完全不同。所以，**memtable_as_log_index** 为 true 和 false 时，WAL 文件的格式完全不同，且互不兼容，所以它是 ImmutableDBOptions，若要更改，不仅需要重新打开 DB，还要确保所有的 WAL 已经 Flush(ConvertToSST 的语义也是 Flush)。
 
-只有在 `convert_to_sst` 为 `kFileMmap` 时，该功能才会激活，因为它依赖于 ConvertToSST 功能，只能在 ConvertToSST 中实现。目前的实现方式是：
+当 convert_to_sst 是 kDontConvert 时，Flush 按正常流程执行，在 memtable_as_log_index 为 true 的情况下，相当于只是减少了 MemTable 的内存用量及 insert 时对 value 的 memcpy，Flush 中对 MemTable 的扫描遍历是不可避免的，这种配置价值不大。
 
-在 TableProperties.compression_options 中增加 `LogIndex;blob_no:wal_no:cnt:bytes,...`，记录该 MemTable 引用的 WAL 文件，为了让 LSM 树感知文件引用关系，为引用的每个 WAL 文件创建一个 blob 文件硬链接，该 MemTable 转化成 SST 文件交给 LSM 树之后，LSM 树就认为该 SST 文件引用了相应的 blob 文件。之所以使用这样的方式实现文件引用关系，是因为 LSM 树没法知道 WAL 文件被 SST 引用，这样做开发成本最低。
+当 convert_to_sst 是 kDumpMem 或 kFileMmap 时，Flush 实质上是 ConvertToSST，这种配置是价值最大的，在 ConvertToSST 中：
+
+在 TableProperties.compression_options 中增加 `LogRef:<Plain|Short>;blob_no:wal_no:cnt:bytes,...`，记录该 MemTable 引用的 WAL 文件，为了让 LSM 树感知文件引用关系，为引用的每个 WAL 文件创建一个 blob 文件硬链接，该 MemTable 转化成 SST 文件交给 LSM 树之后，LSM 树就认为该 SST 文件引用了相应的 blob 文件。之所以使用这样的方式实现文件引用关系，是因为 LSM 树没法知道 WAL 文件被 SST 引用，这样做开发成本最低。
 
 使用该功能时，MemTable 的存储格式也发生了变化，使用 `KeyValueToLogRef` 指向 Value 内容所在的 WAL 文件编号以及在该 WAL 文件中的偏移。WAL 文件编号以文本形式存储在前述的 compression_options 中。
 
-`KeyValueToLogRef` 也使用了短数据优化，当 ValueLen ≤ 11 时，Value 的内容直接存储在 `KeyValueToLogRef` 结构体中，此时最后一个字节表示 ValueLen，这种设计避免了小 Value 也要去访问 WAL 文件，当一个 MemTable 关联的某个 WAL 文件的所有 Value 都是短 Value 时，这个 WAL 就不需要被该 MemTable 引用了。
+`KeyValueToLogRef` 也使用了短数据优化(SSO)，当 ValueLen ≤ 11 时，Value 的内容直接存储在 `KeyValueToLogRef` 结构体中，此时最后一个字节表示 ValueLen，这种设计避免了小 Value 也要去访问 WAL 文件，当一个 MemTable 关联的某个 WAL 文件的所有 Value 都是短 Value 时，这个 WAL 就不需要被该 MemTable 引用了。
+
+当 `ref_log_format` 是 `kShortLogRef` 时，以上 `KeyValueToLogRef` 被换成 `KV_ToShortLogRef`，此时短数据优化(SSO)的最大长度是 7。
 
 ## 四、memtablerep_bench
 ToplingDB 在 RocksDB 的 memtablerep_bench 中加入了 cspp，以下脚本对比 skiplist 和 cspp（linux 下必须保证设置了足够的 `vm.nr_hugepages`）
