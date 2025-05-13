@@ -97,6 +97,45 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     }
   };
   static_assert(sizeof(KeyValueToLogRef) == 20);
+  struct KV_ToShortLogRef {
+    operator uint64_t() const noexcept { return tag; } // NOLINT
+    uint64_t tag;
+    union {
+      struct {
+        uint64_t val_pos : 48; // to wal
+        uint64_t wal_idx :  8;
+        uint64_t inline_val_len : 8;
+      };
+      char value[7];
+    };
+    Slice GetValue(const CSPPMemTab* mtab) const noexcept {
+      if (inline_val_len <= sizeof(value)) {
+        return {value, inline_val_len};
+      }
+      ROCKSDB_ASSERT_LT(wal_idx, mtab->m_num_wals);
+      auto wal = mtab->m_wals[wal_idx].wal;
+      auto base = wal->data_;
+      return GetLengthPrefixedSlice(base + val_pos);
+    }
+    void DebugCheckUserKey(const CSPPMemTab* mtab, Slice uk) const {
+     #if !defined(NDEBUG)
+      if (inline_val_len <= sizeof(value)) {
+        return;
+      }
+      ROCKSDB_ASSERT_LT(wal_idx, mtab->m_num_wals);
+      auto wal = mtab->m_wals[wal_idx].wal;
+      auto base = wal->data_;
+      Slice wal_uk(base + val_pos - uk.size_, uk.size_);
+      assert(uk == wal_uk);
+     #endif
+    }
+  };
+  static_assert(sizeof(KV_ToShortLogRef) == 16);
+  ROCKSDB_ENUM_PLAIN_INCLASS(LogRef_Format, uint8_t,
+    kNoLogRef = 0x0,
+    kPlainLogRef = 0x1,
+    kShortLogRef = 0x2
+  );
 #pragma pack(pop)
   static void encode_pre(Slice d, void* buf) {
     assert(d.size_ > 0); // empty `d` will not call this function
@@ -107,7 +146,7 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   bool          m_read_by_writer_token;
   bool          m_token_use_idle;
   bool          m_accurate_memsize;
-  bool          m_ref_to_wal : 1;
+  LogRef_Format m_ref_to_wal;
   bool          m_rev : 1;
   bool          m_is_flushed : 1;
   bool          m_is_empty : 1;
@@ -184,7 +223,8 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
     size_t num_dup_user_keys = 0;
     LogFileCntBytesThreadLocal m_wal_cnt_bytes[MAX_WALS] = {};
     ~Token();
-    void SetKeyValueToLogRef(CSPPMemTab*, KeyValueToLogRef*);
+    template<class EntryLogRef>
+    void SetKeyValueToLogRef(CSPPMemTab*, EntryLogRef*);
     bool init_value(void* trie_valptr, size_t trie_valsize) noexcept final;
     void destroy_value(void* valptr, size_t valsize) noexcept final;
     bool insert_for_dup_user_key(CSPPMemTab*);
@@ -259,7 +299,9 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
       return binary_search_0(entry, num, find_tag);
     };
     auto p = m_trie.mem_get(vec_pin->pos);
-    bool ret = m_ref_to_wal ? bs((KeyValueToLogRef*)p) : bs((Entry*)p);
+    bool ret = m_ref_to_wal == kPlainLogRef ? bs((KeyValueToLogRef*)p)
+             : m_ref_to_wal == kShortLogRef ? bs((KV_ToShortLogRef*)p)
+             : bs((Entry*)p);
     m_token_use_idle ? token->idle() : token->release();
     return ret;
   }
@@ -324,14 +366,19 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   terark_forceinline Slice GetValue(const KeyValueToLogRef& e) const {
     return e.GetValue(this);
   }
+  terark_forceinline Slice GetValue(const KV_ToShortLogRef& e) const {
+    return e.GetValue(this);
+  }
   ROCKSDB_FLATTEN
   void Get(const ReadOptions& ro, const LookupKey& k, void* callback_args,
            bool(*callback_func)(void*, const KeyValuePair&)) final {
     if (UNLIKELY(m_is_empty)) {
       return;
     }
-    if (m_ref_to_wal)
+    if (m_ref_to_wal == kPlainLogRef)
       return GetTpl<KeyValueToLogRef>(ro, k, callback_args, callback_func);
+    else if (m_ref_to_wal == kShortLogRef)
+      return GetTpl<KV_ToShortLogRef>(ro, k, callback_args, callback_func);
     else
       return GetTpl<Entry>(ro, k, callback_args, callback_func);
   }
@@ -375,8 +422,10 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   }
   Status SST_Get(const ReadOptions& ro,  const Slice& ikey,
                  GetContext* get_context) const {
-    if (m_ref_to_wal)
+    if (m_ref_to_wal == kPlainLogRef)
       return SST_GetTpl<KeyValueToLogRef>(ro, ikey, get_context);
+    else if (m_ref_to_wal == kShortLogRef)
+      return SST_GetTpl<KV_ToShortLogRef>(ro, ikey, get_context);
     else
       return SST_GetTpl<Entry>(ro, ikey, get_context);
   }
@@ -441,7 +490,8 @@ struct CSPPMemTab : public MemTableRep, public MemTabLinkListNode {
   }
   void ToWebViewJson(json&, const json& dump_options) const;
 };
-void CSPPMemTab::Token::SetKeyValueToLogRef(CSPPMemTab* mtab, KeyValueToLogRef* entry) {
+template<class EntryLogRef>
+void CSPPMemTab::Token::SetKeyValueToLogRef(CSPPMemTab* mtab, EntryLogRef* entry) {
   entry->tag = tag_;
   if (0 == val_.size()) { // Delete/SingleDelete/...
     memset(entry->value, 0, sizeof(entry->value)+1);
@@ -461,15 +511,19 @@ void CSPPMemTab::Token::SetKeyValueToLogRef(CSPPMemTab* mtab, KeyValueToLogRef* 
     x.cnt++;
     x.bytes += valsize;
     size_t THREAD_LOCAL_THRESHOLD = TERARK_IF_DEBUG(1, 512 * 1024);
-    size_t approximate_inc_bytes = x.cnt * sizeof(KeyValueToLogRef) + x.bytes;
+    size_t approximate_inc_bytes = x.cnt * sizeof(EntryLogRef) + x.bytes;
     if (UNLIKELY(approximate_inc_bytes > THREAD_LOCAL_THRESHOLD)) {
       as_atomic(mtab->m_wals[fidx].cnt).fetch_add(x.cnt, std::memory_order_relaxed);
       as_atomic(mtab->m_wals[fidx].bytes).fetch_add(x.bytes, std::memory_order_relaxed);
       x = {}; // reset
     }
     entry->wal_idx = fidx;
-    entry->val_pos = kv_pmt->val_pos;
-    entry->val_len = valsize;
+    if constexpr (std::is_same_v<EntryLogRef, KeyValueToLogRef>) {
+      entry->val_pos = kv_pmt->val_pos;
+      entry->val_len = valsize;
+    } else {
+      entry->val_pos = kv_pmt->val_pos - VarintLength(valsize);
+    }
     entry->inline_val_len = 255; // as a flag
   }
   TERARK_ASSERT_S_EQ(entry->GetValue(mtab), kv_pmt->value);
@@ -482,7 +536,8 @@ bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
   static_assert(Align == 4); // now it must be 4
   static_assert(sizeof(VecPin) % Align == 0);
   auto mtab = (CSPPMemTab*)((char*)(trie) - offsetof(CSPPMemTab, m_trie));
-  if (mtab->m_ref_to_wal) {
+  auto init_ref = [=](auto* dummy) {
+    using KeyValueToLogRef = std::remove_reference_t<decltype(*dummy)>;
     size_t vec_pin_pos = trie->mem_alloc(sizeof(VecPin) + sizeof(KeyValueToLogRef));
     TERARK_VERIFY_NE(vec_pin_pos, MainPatricia::mem_alloc_fail);
     auto vec_pin = (VecPin*)(trie->mem_get(vec_pin_pos));
@@ -491,6 +546,12 @@ bool CSPPMemTab::Token::init_value(void* trie_valptr, size_t valsize) noexcept {
     vec_pin->num = 1;
     *(uint32_t*)trie_valptr = (uint32_t)vec_pin_pos;
     return true;
+  };
+  if (mtab->m_ref_to_wal == kPlainLogRef) {
+    return init_ref((KeyValueToLogRef*)nullptr);
+  }
+  if (mtab->m_ref_to_wal == kShortLogRef) {
+    return init_ref((KV_ToShortLogRef*)nullptr);
   }
   size_t enc_val_len = EncValueLen(val_.size());
   size_t vec_pin_pos = trie->mem_alloc(sizeof(VecPin) + sizeof(Entry) + enc_val_len);
@@ -519,8 +580,13 @@ void CSPPMemTab::Token::destroy_value(void* trie_valptr, size_t valsize) noexcep
   auto trie = static_cast<MainPatricia*>(m_trie);
   size_t vec_pin_pos = *(const uint32_t*)trie_valptr;
   auto mtab = (CSPPMemTab*)((char*)(trie) - offsetof(CSPPMemTab, m_trie));
-  if (mtab->m_ref_to_wal) {
+  if (mtab->m_ref_to_wal == kPlainLogRef) {
     size_t mem_block_len = sizeof(VecPin) + sizeof(KeyValueToLogRef);
+    trie->mem_free(vec_pin_pos, mem_block_len); // free right now, not lazy free
+    return;
+  }
+  if (mtab->m_ref_to_wal == kShortLogRef) {
+    size_t mem_block_len = sizeof(VecPin) + sizeof(KV_ToShortLogRef);
     trie->mem_free(vec_pin_pos, mem_block_len); // free right now, not lazy free
     return;
   }
@@ -553,7 +619,8 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
   TERARK_ASSERT_GT(num, 0);
   TERARK_ASSERT_LE(num, old_cap);
   const auto entry_old_pos = vec_pin->pos;
-  if (tab->m_ref_to_wal) {
+  auto insert_dup = [&,this](auto* dummy) {
+    using KeyValueToLogRef = std::remove_reference_t<decltype(*dummy)>;
     const auto entry_old = (KeyValueToLogRef*)trie->mem_get(entry_old_pos);
     const uint64_t curr_seq = tag_ >> 8;
     const uint64_t last_seq = entry_old[num-1].tag >> 8;
@@ -596,6 +663,12 @@ bool CSPPMemTab::Token::insert_for_dup_user_key(CSPPMemTab* tab) {
     as_atomic(vec_pin->num).store(num + 1, std::memory_order_release);
     trie->mem_lazy_free(entry_old_pos, sizeof(KeyValueToLogRef) * old_cap, this);
     return true;
+  };
+  if (tab->m_ref_to_wal == kPlainLogRef) {
+    return insert_dup((KeyValueToLogRef*)nullptr);
+  }
+  if (tab->m_ref_to_wal == kShortLogRef) {
+    return insert_dup((KV_ToShortLogRef*)nullptr);
   }
   const auto entry_old = (Entry*)trie->mem_get(entry_old_pos);
   const uint64_t curr_seq = tag_ >> 8;
@@ -900,6 +973,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
   bool   accurate_memsize = false; // mainly for debug and unit test
   bool   sync_sst_file = true;
   bool   enableApproximateNumEntries = false; // may be pretty not accurate
+  CSPPMemTab::LogRef_Format log_ref_format = CSPPMemTab::kShortLogRef;
   ConvertKind convert_to_sst = ConvertKind::kDontConvert;
   std::string chroot_dir; // default empty
   size_t chunk_size = huge_2m;
@@ -1017,6 +1091,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_OPT_PROP(js, read_by_writer_token);
     ROCKSDB_JSON_OPT_PROP(js, token_use_idle);
     ROCKSDB_JSON_OPT_PROP(js, accurate_memsize);
+    ROCKSDB_JSON_OPT_ENUM(js, log_ref_format);
     ROCKSDB_JSON_OPT_ENUM(js, convert_to_sst);
     ROCKSDB_JSON_OPT_PROP(js, sync_sst_file);
     ROCKSDB_JSON_OPT_PROP(js, enableApproximateNumEntries);
@@ -1071,6 +1146,7 @@ struct CSPPMemTabFactory final : public MemTableRepFactory {
     ROCKSDB_JSON_SET_PROP(djs, read_by_writer_token);
     ROCKSDB_JSON_SET_PROP(djs, token_use_idle);
     ROCKSDB_JSON_SET_PROP(djs, accurate_memsize);
+    ROCKSDB_JSON_SET_ENUM(djs, log_ref_format);
     ROCKSDB_JSON_SET_ENUM(djs, convert_to_sst);
     ROCKSDB_JSON_SET_PROP(djs, sync_sst_file);
     ROCKSDB_JSON_SET_PROP(djs, enableApproximateNumEntries);
@@ -1191,8 +1267,10 @@ MemTableRep::Iterator* CSPPMemTab::GetIterator(Arena* a) {
   as_atomic(m_fac->live_iter_num).fetch_add(1, std::memory_order_relaxed);
   as_atomic(m_cumu_iter_num).fetch_add(1, std::memory_order_relaxed);
   as_atomic(m_live_iter_num).fetch_add(1, std::memory_order_relaxed);
-  if (m_ref_to_wal)
+  if (m_ref_to_wal == kPlainLogRef)
     return MakeIter<Iter<KeyValueToLogRef> >(this, a);
+  else if (m_ref_to_wal == kShortLogRef)
+    return MakeIter<Iter<KV_ToShortLogRef> >(this, a);
   else
     return MakeIter<Iter<Entry> >(this, a);
 }
@@ -1243,7 +1321,7 @@ inline void CSPPMemTab::init(bool rev, Logger* log, CSPPMemTabFactory* f) {
   m_read_by_writer_token = f->read_by_writer_token;
   m_token_use_idle = f->token_use_idle;
   m_accurate_memsize = f->accurate_memsize;
-  m_ref_to_wal = false;
+  m_ref_to_wal = kNoLogRef;
   f->m_mtx.lock();
   f->live_num++;
   m_next = &f->m_head; // insert 'this' at linked list tail
@@ -1277,7 +1355,10 @@ CSPPMemTab::~CSPPMemTab() noexcept {
   }
 }
 void CSPPMemTab::InitSetMemTableAsLogIndex(bool b) {
-  m_ref_to_wal = b && SupportConvertToSST();
+  if (b)
+    m_ref_to_wal = m_fac->log_ref_format;
+  else
+    m_ref_to_wal = kNoLogRef;
 }
 CSPPMemTab::Token::~Token() {
   // sync Token stats to MemTab
@@ -1597,7 +1678,13 @@ try {
   if (m_ref_to_wal) {
     auto& oss = static_cast<string_appender<>&>(builder.properties_.compression_options);
     oss.clear();
-    oss|"LogIndex;";
+    if (m_ref_to_wal == kPlainLogRef) {
+      oss|"LogRef:Plain;";
+    } else if (m_ref_to_wal == kShortLogRef) {
+      oss|"LogRef:Short;";
+    } else {
+      ROCKSDB_DIE("Unexpected m_ref_to_wal = %d", m_ref_to_wal);
+    }
     if (m_num_wals) {
       meta->oldest_blob_file_number = UINT64_MAX;
       for (size_t i = 0; i < m_num_wals; i++) {
@@ -1790,9 +1877,18 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
 
   table_properties_->compression_name = "CSPPMemTab";
   std::string& compression_options = table_properties_->compression_options;
-  if (Slice(compression_options).starts_with("LogIndex;")) {
-    char* item = &compression_options[strlen("LogIndex;")];
-    m_memtab->m_ref_to_wal = true;
+  if (Slice(compression_options).starts_with("LogRef:")) {
+    const char* item = strchr(compression_options.c_str(), ';');
+    ROCKSDB_VERIFY(item != nullptr);
+    const fstring name(compression_options.c_str(), item);
+    if (name == "LogRef:Plain") {
+      m_memtab->m_ref_to_wal = CSPPMemTab::kPlainLogRef;
+    } else if (name == "LogRef:Short") {
+      m_memtab->m_ref_to_wal = CSPPMemTab::kShortLogRef;
+    } else {
+      ROCKSDB_DIE("Unexpected LogRef: %s", compression_options.c_str());
+    }
+    item += 1; // skip ';'
     for (size_t i = 0; true; i++) {
       size_t blob_no = 0, wal_no = 0, cnt = 0, bytes = 0;
       int fields = sscanf(item, "%zd:%zd:%zd:%zd", &blob_no, &wal_no, &cnt, &bytes);
@@ -1849,10 +1945,15 @@ CSPPMemTabTableReader::CSPPMemTabTableReader(RandomAccessFileReader* file,
   size_t num_entries = table_properties_->num_entries;
   size_t num_user_keys = m_memtab->m_trie.num_words();
   table_properties_->tag_size = 8 * num_entries;
-  if (m_memtab->m_ref_to_wal) {
+  if (m_memtab->m_ref_to_wal == CSPPMemTab::kPlainLogRef) {
     table_properties_->data_size = // no raw_value_size which is in wal
       (sizeof(CSPPMemTab::VecPin) + sizeof(uint32_t)) * num_user_keys +
       (sizeof(CSPPMemTab::KeyValueToLogRef) - sizeof(uint64_t)) * num_entries;
+  }
+  else if (m_memtab->m_ref_to_wal == CSPPMemTab::kShortLogRef) {
+    table_properties_->data_size = // no raw_value_size which is in wal
+      (sizeof(CSPPMemTab::VecPin) + sizeof(uint32_t)) * num_user_keys +
+      (sizeof(CSPPMemTab::KV_ToShortLogRef) - sizeof(uint64_t)) * num_entries;
   }
   else {
     table_properties_->data_size = table_properties_->raw_value_size +
@@ -1918,6 +2019,7 @@ std::string
 CSPPMemTabTableReader::ToWebViewString(const json& dump_options) const {
   json djs;
   size_t num_user_keys = m_memtab->m_trie.num_words();
+  djs["log_ref_format"] = enum_stdstr(m_memtab->m_ref_to_wal);
   djs["num_user_keys"] = num_user_keys;
   djs["num_entries"] = table_properties_->num_entries;
   djs["num_deletions"] = table_properties_->num_deletions;
@@ -1995,7 +2097,10 @@ CSPPMemTabTableReader::ToWebViewString(const json& dump_options) const {
     djs["trie_mem"] = SizeAvgPercent(trie_mem_size, num_entries, trie_mem_size + sum_ref_size, " (trie+wal mem)");
     djs["trie_file"] = SizeAvgPercent(trie_file_size, num_entries, trie_file_size + sum_file_size, " (trie+wal file)");
     // ref_ptr_unit does not count the 8 bytes of uint64 tag
-    size_t ref_ptr_unit = sizeof(CSPPMemTab::KeyValueToLogRef) - sizeof(uint64_t);
+    size_t sizeof_ref_struct = m_memtab->m_ref_to_wal == CSPPMemTab::kPlainLogRef
+                             ? sizeof(CSPPMemTab::KeyValueToLogRef)
+                             : sizeof(CSPPMemTab::KV_ToShortLogRef);
+    size_t ref_ptr_unit = sizeof_ref_struct - sizeof(uint64_t); // exclude tag
     size_t vec_pin_size = sizeof(CSPPMemTab::VecPin) * num_user_keys;
     size_t ref_ptr_size = ref_ptr_unit * num_entries;
     size_t ref_overhead = sizeof(uint32_t) * num_user_keys + vec_pin_size + ref_ptr_size;
@@ -2004,7 +2109,8 @@ CSPPMemTabTableReader::ToWebViewString(const json& dump_options) const {
     djs["ref_overhead"] = SizeAvgPercent(ref_overhead, num_entries, trie_mem_size, " (trie mem)");
     // djs["refwal_avg"] = sum_ref_size / double(sum_ref_cnt); // has shown in "ref_to_wal"
   } else {
-    djs["ref_to_wal"] = bool(m_memtab->m_ref_to_wal);
+    auto ref_to_wal = m_memtab->m_ref_to_wal;
+    ROCKSDB_JSON_SET_ENUM(djs, ref_to_wal);
   }
   m_memtab->ToWebViewJson(djs, dump_options);
   return JsonToString(djs, dump_options);
